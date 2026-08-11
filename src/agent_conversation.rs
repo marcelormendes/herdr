@@ -19,7 +19,7 @@ use serde_json::Value;
 use crate::agent_resume::TranscriptRef;
 use crate::api::schema::conversations::{
     ConversationItem, ConversationItemPayload, ConversationPageDirection, ConversationReasonCode,
-    ConversationSessionIdentity, ToolStatus,
+    ConversationSessionIdentity, ToolStatus, TurnStateKind,
 };
 
 pub const MAX_SCAN_BYTES: u64 = 16 * 1024 * 1024;
@@ -464,6 +464,18 @@ impl ConversationReader {
         if record_bytes > MAX_RECORD_BYTES {
             return false;
         }
+        // Invariant: at most one turn is open per conversation. Providers
+        // only send the terminal turn state when a response completes; a new
+        // prompt sent mid-response leaves the previous turn started forever.
+        // Closing it here keeps one Working indicator at a time and matches
+        // the interruption semantics the user actually experienced.
+        if let ConversationItemPayload::TurnState {
+            state: TurnStateKind::Started,
+            ..
+        } = &record.payload
+        {
+            self.close_stale_started_turns(&record);
+        }
         if let Some(state) = self.state.as_mut() {
             let duplicate = state.log.iter().any(|entry| {
                 entry.native_id == record.native_id && entry.payload == record.payload
@@ -519,6 +531,109 @@ impl ConversationReader {
             return true;
         }
         false
+    }
+
+    /// When a new turn starts, marks every other still-open (started) turn as
+    /// interrupted. Runs before the incoming record is stored, so the fresh
+    /// turn is never closed by its own scan; records targeting the incoming
+    /// turn id with a different native id stay open (a restarted turn).
+    fn close_stale_started_turns(&mut self, incoming: &OverlayRecord) {
+        let Some(incoming_turn) = incoming.turn_id.as_deref() else {
+            return;
+        };
+        let incoming_native = incoming.native_id.as_deref();
+        let interrupted_at = incoming.timestamp_ms;
+
+        let stale_overlay = |entry: &CanonicalEntry| {
+            entry.overlay
+                && !(incoming_native.is_some() && entry.native_id.as_deref() == incoming_native)
+                && entry.turn_id.as_deref() != Some(incoming_turn)
+                && matches!(
+                    entry.payload,
+                    ConversationItemPayload::TurnState {
+                        state: TurnStateKind::Started,
+                        ..
+                    }
+                )
+        };
+
+        if let Some(state) = self.state.as_mut() {
+            let stale: Vec<CanonicalEntry> = state
+                .log
+                .iter()
+                .filter(|e| stale_overlay(e))
+                .cloned()
+                .collect();
+            for entry in stale {
+                let Some(native_id) = entry.native_id.clone() else {
+                    continue;
+                };
+                let started_ms = match entry.payload {
+                    ConversationItemPayload::TurnState { started_ms, .. } => started_ms,
+                    _ => None,
+                };
+                let record = OverlayRecord {
+                    native_id: Some(native_id),
+                    entry_id: None,
+                    timestamp_ms: interrupted_at.or(entry.timestamp_ms),
+                    turn_id: entry.turn_id.clone(),
+                    payload: ConversationItemPayload::TurnState {
+                        state: TurnStateKind::Interrupted,
+                        started_ms,
+                        duration_ms: interrupted_at
+                            .zip(started_ms)
+                            .map(|(end, start)| end.saturating_sub(start)),
+                        error: None,
+                    },
+                };
+                upsert_overlay(state, &self.session, record);
+            }
+            return;
+        }
+
+        let stale: Vec<OverlayRecord> = self
+            .pending_overlays
+            .iter()
+            .filter(|record| {
+                !(incoming_native.is_some() && record.native_id.as_deref() == incoming_native)
+                    && record.turn_id.as_deref() != Some(incoming_turn)
+                    && matches!(
+                        record.payload,
+                        ConversationItemPayload::TurnState {
+                            state: TurnStateKind::Started,
+                            ..
+                        }
+                    )
+            })
+            .cloned()
+            .collect();
+        for record in stale {
+            let started_ms = match record.payload {
+                ConversationItemPayload::TurnState { started_ms, .. } => started_ms,
+                _ => None,
+            };
+            let interrupted = OverlayRecord {
+                native_id: record.native_id,
+                entry_id: None,
+                timestamp_ms: interrupted_at.or(record.timestamp_ms),
+                turn_id: record.turn_id,
+                payload: ConversationItemPayload::TurnState {
+                    state: TurnStateKind::Interrupted,
+                    started_ms,
+                    duration_ms: interrupted_at
+                        .zip(started_ms)
+                        .map(|(end, start)| end.saturating_sub(start)),
+                    error: None,
+                },
+            };
+            if let Some(index) = self
+                .pending_overlays
+                .iter()
+                .position(|item| item.native_id.as_deref() == interrupted.native_id.as_deref())
+            {
+                self.pending_overlays[index] = interrupted;
+            }
+        }
     }
 
     fn adapter(&self) -> &'static dyn ProviderAdapter {
@@ -2046,6 +2161,82 @@ mod tests {
                 .unwrap();
             assert!(page.items.iter().any(|item| matches!(item.payload, ConversationItemPayload::AssistantMessage { ref text, .. } if text == "active")));
             assert!(!page.items.iter().any(|item| matches!(item.payload, ConversationItemPayload::AssistantMessage { ref text, .. } if text == "abandoned")));
+        });
+    }
+
+    #[test]
+    fn starting_a_new_turn_closes_the_previous_open_turn() {
+        with_pi_fixture(|path| {
+            std::fs::write(
+                path,
+                "{\"type\":\"message\",\"id\":\"m1\",\"parentId\":null,\"message\":{\"role\":\"user\",\"content\":\"first\"}}\n",
+            )
+            .unwrap();
+            let transcript = TranscriptRef::new("pi", path).unwrap();
+            let mut reader = ConversationReader::new(
+                crate::detect::Agent::Pi,
+                "session".into(),
+                "engine-open-turn",
+                1,
+            );
+            assert!(reader.accept_overlay(OverlayRecord {
+                native_id: Some("overlay:a".into()),
+                entry_id: None,
+                timestamp_ms: Some(1_000),
+                turn_id: Some("turn:a".into()),
+                payload: ConversationItemPayload::TurnState {
+                    state: TurnStateKind::Started,
+                    started_ms: Some(1_000),
+                    duration_ms: None,
+                    error: None,
+                },
+            }));
+            // A prompt sent mid-response opens turn B while turn A is still
+            // started; the provider never sends a terminal state for A.
+            assert!(reader.accept_overlay(OverlayRecord {
+                native_id: Some("overlay:b".into()),
+                entry_id: None,
+                timestamp_ms: Some(2_000),
+                turn_id: Some("turn:b".into()),
+                payload: ConversationItemPayload::TurnState {
+                    state: TurnStateKind::Started,
+                    started_ms: Some(2_000),
+                    duration_ms: None,
+                    error: None,
+                },
+            }));
+            let page = reader
+                .read(&transcript, None, ConversationPageDirection::Newest, 16)
+                .page
+                .unwrap();
+            let states_for = |turn: &str| {
+                let mut states: Vec<_> = page
+                    .items
+                    .iter()
+                    .filter(|item| item.turn_id.as_deref() == Some(turn))
+                    .filter_map(|item| match &item.payload {
+                        ConversationItemPayload::TurnState { state, .. } => Some(*state),
+                        _ => None,
+                    })
+                    .collect();
+                states.sort_by_key(|state| match state {
+                    TurnStateKind::Started => 0,
+                    TurnStateKind::Interrupted => 1,
+                    TurnStateKind::Completed => 2,
+                    TurnStateKind::Failed => 3,
+                });
+                states
+            };
+            assert_eq!(
+                states_for("turn:a"),
+                vec![TurnStateKind::Interrupted],
+                "starting a new turn closes the previous open turn"
+            );
+            assert_eq!(
+                states_for("turn:b"),
+                vec![TurnStateKind::Started],
+                "the incoming turn stays open"
+            );
         });
     }
 
