@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## [0.8.1] - 2026-08-11
+
+### Added
+- Added an opt-in structured agent conversation API, advertised through the `agent_conversations` server capability (off by default) and per-pane `conversation_capability`/`conversation_session` snapshot fields. Clients that do not use it are unaffected and the terminal wire protocol is unchanged.
+- Added provider-neutral turn, message, plan, tool, file-change, approval, and attachment conversation models with stable opaque IDs, plus live conversation subscriptions and approval responses.
+- Added Codex, Claude, Pi, and Oh My Pi transcript adapters that read each provider's own durable session records.
+- Added authenticated attachment staging with bounded size and lifetime, and restored-pane conversation identity continuity across server handoff.
+
 ## [0.8.0] - 2026-08-03
 
 ### Added
