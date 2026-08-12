@@ -391,11 +391,15 @@ test("OMP publishes live tool and approval overlays", async () => {
     context,
   );
 
-  await waitFor(
-    () =>
-      requests.filter(
-        (request) => isRecord(request) && request.method === "agent.conversation.report",
-      ).length >= 6,
+  await waitFor(() =>
+    requests.some(
+      (request) =>
+        isRecord(request) &&
+        request.method === "agent.conversation.report" &&
+        isRecord(request.params) &&
+        isRecord(request.params.payload) &&
+        request.params.payload.type === "approval",
+    ),
   );
   const payloadTypes = requests
     .filter((request) => isRecord(request) && request.method === "agent.conversation.report")
