@@ -121,6 +121,7 @@ pub struct TerminalState {
     pub id: TerminalId,
     pub cwd: PathBuf,
     pub detected_agent: Option<Agent>,
+    pub agent_has_arguments: Option<bool>,
     pub fallback_state: AgentState,
     fallback_visible_blocker: bool,
     fallback_observed_at: Option<Instant>,
@@ -158,6 +159,7 @@ impl TerminalState {
             id,
             cwd,
             detected_agent: None,
+            agent_has_arguments: None,
             fallback_state: AgentState::Unknown,
             fallback_visible_blocker: false,
             fallback_observed_at: None,
@@ -191,12 +193,16 @@ impl TerminalState {
     pub fn set_detected_agent_process_at(
         &mut self,
         agent: Agent,
+        agent_has_arguments: Option<bool>,
         now: Instant,
     ) -> TerminalStateMutation {
+        let is_current_observation =
+            !self.detected_state_observed_before_release_suppression(Some(agent), now);
         let starts_acquisition = !self
             .should_ignore_detected_state_under_full_lifecycle_hook(Some(agent), false)
-            && !self.detected_state_observed_before_release_suppression(Some(agent), now);
-        let mutation = self.set_detected_state_with_screen_signals_at(
+            && is_current_observation;
+        let previous_agent_has_arguments = self.agent_has_arguments;
+        let mut mutation = self.set_detected_state_with_screen_signals_at(
             Some(agent),
             AgentState::Unknown,
             false,
@@ -205,6 +211,15 @@ impl TerminalState {
             false,
             now,
         );
+        if is_current_observation && self.detected_agent == Some(agent) {
+            self.agent_has_arguments = agent_has_arguments;
+            if previous_agent_has_arguments != self.agent_has_arguments
+                && mutation.effective_state_change.is_none()
+            {
+                mutation.effective_state_change =
+                    Some(self.unchanged_effective_state_change_at(now));
+            }
+        }
         if starts_acquisition {
             self.agent_process_acquisition_pending = true;
         }
@@ -333,6 +348,9 @@ impl TerminalState {
         let previous_state = self.state;
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_detected_agent = self.detected_agent;
+        if process_exited {
+            self.agent_has_arguments = None;
+        }
         let previous_session = self.current_session_identity_for_persistence();
         let newer_custom_authority = process_exited
             && self.hook_authority.as_ref().is_some_and(|authority| {
@@ -2052,6 +2070,7 @@ impl TerminalState {
 
     pub fn clear_agent_runtime_identity_after_respawn(&mut self) {
         self.detected_agent = None;
+        self.agent_has_arguments = None;
         self.fallback_state = AgentState::Unknown;
         self.fallback_visible_blocker = false;
         self.fallback_observed_at = None;
@@ -5595,6 +5614,26 @@ mod tests {
     }
 
     #[test]
+    fn detected_agent_arguments_follow_process_lifecycle() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+
+        terminal.set_detected_agent_process_at(Agent::Claude, Some(true), now);
+        assert_eq!(terminal.agent_has_arguments, Some(true));
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            true,
+            now + Duration::from_millis(1),
+        );
+        assert_eq!(terminal.agent_has_arguments, None);
+    }
+
+    #[test]
     fn respawn_cleanup_resets_restored_agent_status() {
         let mut terminal = test_terminal();
         terminal.respawn_shell_on_exit = true;
@@ -5605,7 +5644,7 @@ mod tests {
             session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
         });
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
-        terminal.set_detected_agent_process_at(Agent::Codex, Instant::now());
+        terminal.set_detected_agent_process_at(Agent::Codex, Some(false), Instant::now());
 
         terminal.clear_agent_runtime_identity_after_respawn();
 

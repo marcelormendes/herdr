@@ -179,6 +179,7 @@ fn normalize_assistant(
     let mut records = Vec::new();
     let content = message.get("content").and_then(Value::as_array);
     let mut text = String::new();
+    let mut progress_index = 0;
     if let Some(blocks) = content {
         for block in blocks {
             match block.get("type").and_then(Value::as_str) {
@@ -223,7 +224,26 @@ fn normalize_assistant(
                         payload,
                     ));
                 }
-                Some("thinking") => {}
+                Some("thinking") => {
+                    let thinking = block.get("thinking").and_then(Value::as_str).unwrap_or("");
+                    for summary in progress_summaries(thinking) {
+                        records.push(record(
+                            entry_id
+                                .as_ref()
+                                .map(|entry| format!("progress:{entry}:{progress_index}")),
+                            entry_id.clone(),
+                            parent_id.clone(),
+                            timestamp_ms,
+                            None,
+                            ConversationItemPayload::AssistantMessage {
+                                phase: AssistantMessagePhase::Commentary,
+                                text: cap_text(summary, MAX_TEXT_BYTES),
+                                state: CompletionState::Completed,
+                            },
+                        ));
+                        progress_index += 1;
+                    }
+                }
                 _ => {}
             }
         }
@@ -417,6 +437,16 @@ fn plan_steps(input: Option<&Value>) -> Vec<PlanStep> {
     steps
 }
 
+fn progress_summaries(thinking: &str) -> impl Iterator<Item = &str> {
+    thinking.lines().filter_map(|line| {
+        line.trim()
+            .strip_prefix("**")
+            .and_then(|line| line.strip_suffix("**"))
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+    })
+}
+
 fn canonical_turn_id(timestamp_ms: Option<u64>) -> Option<String> {
     timestamp_ms.map(|timestamp| format!("turn:{timestamp}"))
 }
@@ -531,6 +561,26 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn native_pi_message_exposes_only_explicit_progress_summaries_from_thinking() {
+        let assistant = normalize_pi_line(
+            r#"{"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":[{"type":"thinking","thinking":"private reasoning\n\n**Inspecting source**\n\nmore private reasoning\n**Running checks**"},{"type":"toolCall","id":"call-1","name":"read","arguments":{"path":"a.txt"}}],"stopReason":"toolUse","timestamp":1}}"#,
+        );
+        let summaries = assistant
+            .iter()
+            .filter_map(|record| match &record.payload {
+                ConversationItemPayload::AssistantMessage {
+                    phase: AssistantMessagePhase::Commentary,
+                    text,
+                    ..
+                } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(summaries, vec!["Inspecting source", "Running checks"]);
+        assert!(!format!("{assistant:?}").contains("private reasoning"));
     }
 
     #[test]

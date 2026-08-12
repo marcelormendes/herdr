@@ -855,6 +855,12 @@
                 "null"
               ]
             },
+            "agent_has_arguments": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "agent_session": {
               "anyOf": [
                 {
@@ -8955,6 +8961,12 @@
             "agent": {
               "type": [
                 "string",
+                "null"
+              ]
+            },
+            "agent_has_arguments": {
+              "type": [
+                "boolean",
                 "null"
               ]
             },

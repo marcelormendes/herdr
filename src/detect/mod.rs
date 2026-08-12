@@ -213,7 +213,9 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
     parse_agent_label(process_name)
 }
 
-pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Agent, String)> {
+pub(crate) fn identify_agent_process_in_job(
+    job: &crate::platform::ForegroundJob,
+) -> Option<(Agent, String, Option<bool>)> {
     if let Some(process) = job
         .processes
         .iter()
@@ -221,11 +223,15 @@ pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Ag
     {
         let candidate = normalized_process_name(process);
         if let Some(agent) = identify_agent(&candidate) {
-            return Some((agent, candidate));
+            return Some((
+                agent,
+                candidate,
+                process_agent_has_arguments(process, agent),
+            ));
         }
     }
 
-    let mut best: Option<(u8, Agent, String)> = None;
+    let mut best: Option<(u8, Agent, String, Option<bool>)> = None;
 
     for process in &job.processes {
         let candidate = normalized_process_name(process);
@@ -235,12 +241,23 @@ pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Ag
         let score = process_priority(process, &candidate);
 
         match &best {
-            Some((best_score, _, _)) if *best_score >= score => {}
-            _ => best = Some((score, agent, candidate)),
+            Some((best_score, _, _, _)) if *best_score >= score => {}
+            _ => {
+                best = Some((
+                    score,
+                    agent,
+                    candidate,
+                    process_agent_has_arguments(process, agent),
+                ));
+            }
         }
     }
 
-    best.map(|(_, agent, name)| (agent, name))
+    best.map(|(_, agent, name, has_arguments)| (agent, name, has_arguments))
+}
+
+pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Agent, String)> {
+    identify_agent_process_in_job(job).map(|(agent, name, _)| (agent, name))
 }
 
 /// Detect the state of an agent from the live terminal tail snapshot.
@@ -352,6 +369,31 @@ fn normalized_process_name(process: &crate::platform::ForegroundProcess) -> Stri
     }
 
     effective.to_string()
+}
+
+fn process_agent_has_arguments(
+    process: &crate::platform::ForegroundProcess,
+    agent: Agent,
+) -> Option<bool> {
+    let argv = process.argv.as_deref()?;
+    let effective = process.argv0.as_deref().unwrap_or(&process.name);
+    if identify_agent(effective) == Some(agent)
+        || argv0_agent_name(Some(argv))
+            .and_then(|name| identify_agent(&name))
+            .is_some_and(|identified| identified == agent)
+    {
+        return Some(argv.len() > 1);
+    }
+
+    let runtime = normalized_agent_lookup_name(path_basename(effective));
+    if !is_generic_runtime_or_shell(&runtime) {
+        return None;
+    }
+    let agent_index = argv.iter().enumerate().skip(1).find_map(|(index, token)| {
+        agent_name_from_path_token(token)
+            .and_then(|name| (identify_agent(&name) == Some(agent)).then_some(index))
+    })?;
+    Some(argv.len() > agent_index + 1)
 }
 
 fn wrapped_agent_name_from_runtime_argv(runtime: &str, argv: Option<&[String]>) -> Option<String> {
@@ -860,6 +902,45 @@ mod tests {
             identify_agent_in_job(&job),
             Some((Agent::Claude, "claude".to_string()))
         );
+    }
+
+    #[test]
+    fn identified_agent_process_reports_native_arguments() {
+        for (argv, expected) in [
+            (vec!["claude"], Some(false)),
+            (vec!["claude", "--model", "opus"], Some(true)),
+        ] {
+            let job = crate::platform::ForegroundJob {
+                process_group_id: 42,
+                processes: vec![foreground_process(42, "claude", &argv)],
+            };
+
+            assert_eq!(
+                identify_agent_process_in_job(&job),
+                Some((Agent::Claude, "claude".to_string(), expected))
+            );
+        }
+    }
+
+    #[test]
+    fn identified_wrapped_agent_ignores_runtime_and_script_arguments() {
+        for (argv, expected) in [
+            (vec!["node", "/path/to/bin/codex"], Some(false)),
+            (
+                vec!["node", "/path/to/bin/codex", "--resume", "session-id"],
+                Some(true),
+            ),
+        ] {
+            let job = crate::platform::ForegroundJob {
+                process_group_id: 42,
+                processes: vec![foreground_process(42, "node", &argv)],
+            };
+
+            assert_eq!(
+                identify_agent_process_in_job(&job),
+                Some((Agent::Codex, "codex".to_string(), expected))
+            );
+        }
     }
 
     #[test]

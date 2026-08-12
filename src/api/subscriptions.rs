@@ -819,6 +819,7 @@ mod tests {
             foreground_cwd: None,
             label: None,
             agent: None,
+            agent_has_arguments: None,
             title: None,
             terminal_title: None,
             terminal_title_stripped: None,

@@ -778,7 +778,7 @@ impl App {
         };
         let workspace_id = self.public_workspace_id(update.ws_idx);
 
-        if update.agent_name_changed {
+        if update.agent_name_changed || update.agent_arguments_changed {
             self.emit_pane_updated(update.ws_idx, update.pane_id);
         }
 

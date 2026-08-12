@@ -493,6 +493,7 @@ impl App {
                 .map(|cwd| cwd.display().to_string()),
             label: terminal.manual_label.clone(),
             agent: terminal.effective_agent_label().map(str::to_string),
+            agent_has_arguments: terminal.agent_has_arguments,
             title: presentation.title,
             terminal_title: terminal.terminal_title.clone(),
             terminal_title_stripped: terminal.terminal_title_stripped(),
