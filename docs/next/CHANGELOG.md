@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.8.3] - 2026-08-12
+
 ### Fixed
 - Structured Chat now restores durable transcript order when completed tool calls reconcile with earlier live overlays, keeping each tool call beside its commentary.
 
