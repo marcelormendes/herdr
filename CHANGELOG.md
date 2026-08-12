@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+- Structured Chat now preserves OMP progress headings between tool calls without exposing private reasoning or collapsing multiple headings into one message.
+- Agent process metadata now reports whether the detected command has native arguments and refreshes clients when that value changes.
+- Agent detection now follows wrapper and runtime arguments through the process lifecycle so clients can choose Chat for bare agents and Terminal for customized launches.
+
 ## [0.8.1] - 2026-08-11
 
 ### Added
