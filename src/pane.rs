@@ -246,12 +246,14 @@ async fn publish_agent_process_detected_event(
     state_events: mpsc::Sender<AppEvent>,
     pane_id: PaneId,
     agent: Agent,
+    agent_has_arguments: Option<bool>,
     observed_at: std::time::Instant,
 ) {
     if let Err(e) = state_events
         .send(AppEvent::AgentProcessDetected {
             pane_id,
             agent,
+            agent_has_arguments,
             observed_at,
         })
         .await
@@ -572,6 +574,7 @@ struct ProcessProbeResult {
     foreground_is_pane_shell: bool,
     agent: Option<Agent>,
     process_name: Option<String>,
+    agent_has_arguments: Option<bool>,
 }
 
 fn agent_hint_for_foreground_job_members(
@@ -594,7 +597,7 @@ fn agent_hint_for_non_leader_foreground_job_members(
 
 fn identify_process_group_leader_in_job(
     job: &crate::platform::ForegroundJob,
-) -> Option<(Agent, String)> {
+) -> Option<(Agent, String, Option<bool>)> {
     let leader = job
         .processes
         .iter()
@@ -603,7 +606,7 @@ fn identify_process_group_leader_in_job(
         process_group_id: job.process_group_id,
         processes: vec![leader.clone()],
     };
-    crate::detect::identify_agent_in_job(&leader_job)
+    crate::detect::identify_agent_process_in_job(&leader_job)
 }
 
 fn process_probe_result(
@@ -611,12 +614,14 @@ fn process_probe_result(
     pid: u32,
     agent: Agent,
     process_name: String,
+    agent_has_arguments: Option<bool>,
 ) -> ProcessProbeResult {
     ProcessProbeResult {
         process_group_id: Some(job.process_group_id),
         foreground_is_pane_shell: job.processes.iter().any(|process| process.pid == pid),
         agent: Some(agent),
         process_name: Some(process_name),
+        agent_has_arguments,
     }
 }
 
@@ -626,11 +631,15 @@ fn hinted_process_probe_result(
     read_hint: impl Fn(u32) -> Option<Agent>,
 ) -> Option<ProcessProbeResult> {
     let agent = agent_hint_for_foreground_job_members(job, read_hint)?;
+    let agent_has_arguments = crate::detect::identify_agent_process_in_job(job)
+        .filter(|(identified, _, _)| *identified == agent)
+        .and_then(|(_, _, has_arguments)| has_arguments);
     Some(process_probe_result(
         job,
         pid,
         agent,
         crate::detect::agent_label(agent).to_string(),
+        agent_has_arguments,
     ))
 }
 
@@ -645,39 +654,54 @@ fn probe_foreground_process_from_jobs(
         if let Some(hinted) = hinted_process_probe_result(job, pid, read_hint) {
             return hinted;
         }
-        if let Some((agent, process_name)) = crate::detect::identify_agent_in_job(job) {
-            return process_probe_result(job, pid, agent, process_name);
+        if let Some((agent, process_name, has_arguments)) =
+            crate::detect::identify_agent_process_in_job(job)
+        {
+            return process_probe_result(job, pid, agent, process_name, has_arguments);
         }
     }
 
     let foreground_job = foreground_job();
     if let Some(job) = foreground_job.as_ref() {
         if let Some(agent) = read_hint(job.process_group_id) {
+            let has_arguments = crate::detect::identify_agent_process_in_job(job)
+                .filter(|(identified, _, _)| *identified == agent)
+                .and_then(|(_, _, has_arguments)| has_arguments);
             return process_probe_result(
                 job,
                 pid,
                 agent,
                 crate::detect::agent_label(agent).to_string(),
+                has_arguments,
             );
         }
-        if let Some((agent, process_name)) = identify_process_group_leader_in_job(job) {
-            return process_probe_result(job, pid, agent, process_name);
+        if let Some((agent, process_name, has_arguments)) =
+            identify_process_group_leader_in_job(job)
+        {
+            return process_probe_result(job, pid, agent, process_name, has_arguments);
         }
         if let Some(agent) = agent_hint_for_non_leader_foreground_job_members(job, read_hint) {
+            let has_arguments = crate::detect::identify_agent_process_in_job(job)
+                .filter(|(identified, _, _)| *identified == agent)
+                .and_then(|(_, _, has_arguments)| has_arguments);
             return process_probe_result(
                 job,
                 pid,
                 agent,
                 crate::detect::agent_label(agent).to_string(),
+                has_arguments,
             );
         }
 
-        let identified = crate::detect::identify_agent_in_job(job);
+        let identified = crate::detect::identify_agent_process_in_job(job);
         return ProcessProbeResult {
             process_group_id: Some(job.process_group_id),
             foreground_is_pane_shell: job.processes.iter().any(|process| process.pid == pid),
-            agent: identified.as_ref().map(|(agent, _)| *agent),
-            process_name: identified.map(|(_, process_name)| process_name),
+            agent: identified.as_ref().map(|(agent, _, _)| *agent),
+            process_name: identified
+                .as_ref()
+                .map(|(_, process_name, _)| process_name.clone()),
+            agent_has_arguments: identified.and_then(|(_, _, has_arguments)| has_arguments),
         };
     }
 
@@ -686,6 +710,7 @@ fn probe_foreground_process_from_jobs(
         foreground_is_pane_shell: false,
         agent: None,
         process_name: None,
+        agent_has_arguments: None,
     }
 }
 
@@ -809,6 +834,7 @@ fn spawn_basic_detection_task(
                 let had_process_probe = has_process_probe;
                 has_process_probe = true;
                 let probe = probe_foreground_process(pid, foreground_pgid);
+                let agent_has_arguments = probe.agent_has_arguments;
                 let process_group_id = probe.process_group_id;
                 let tracked_process_group_id =
                     process_group_for_change_tracking(foreground_pgid, process_group_id);
@@ -868,6 +894,7 @@ fn spawn_basic_detection_task(
                                 state_events.clone(),
                                 pane_id,
                                 agent,
+                                agent_has_arguments,
                                 now,
                             )
                             .await;
@@ -2327,6 +2354,7 @@ impl PaneRuntime {
                         has_process_probe = true;
                         if pid > 0 {
                             let probe = probe_foreground_process(pid, foreground_pgid);
+                            let agent_has_arguments = probe.agent_has_arguments;
                             let process_name = probe.process_name;
                             let process_group_id = probe.process_group_id;
                             let tracked_process_group_id = process_group_for_change_tracking(
@@ -2395,6 +2423,7 @@ impl PaneRuntime {
                                             state_events.clone(),
                                             pane_id,
                                             agent,
+                                            agent_has_arguments,
                                             now,
                                         )
                                         .await;

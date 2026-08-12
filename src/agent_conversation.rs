@@ -2164,6 +2164,7 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
     #[test]
     fn starting_a_new_turn_closes_the_previous_open_turn() {
         with_pi_fixture(|path| {

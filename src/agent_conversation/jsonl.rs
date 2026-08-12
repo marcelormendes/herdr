@@ -475,6 +475,13 @@ fn canonicalize_record_identity(state: &mut SourceReaderState, record: &mut Nati
     let Some(turn_id) = record.turn_id.as_deref() else {
         return;
     };
+    if record
+        .native_id
+        .as_deref()
+        .is_some_and(|native_id| native_id.starts_with("progress:"))
+    {
+        return;
+    }
     if let Some(native_id) = canonical_native_id_for_payload(
         state,
         record.entry_id.as_deref(),
@@ -926,6 +933,47 @@ mod tests {
                 crate::api::schema::conversations::ConversationItemPayload::AssistantMessage { .. }
             ) && record.native_id.as_deref() == Some("message:turn:1700000000000:0")
         }));
+    }
+
+    #[test]
+    fn pi_progress_summaries_keep_distinct_canonical_items() {
+        let mut state = SourceReaderState::new(
+            SourceFingerprint {
+                identity_token: "source".into(),
+                size: 0,
+                modified: SystemTime::UNIX_EPOCH,
+                canonical_path: std::path::PathBuf::from("/tmp/source.jsonl"),
+            },
+            crate::agent_conversation::ReaderLimits::production(),
+        );
+        let records = [
+            r#"{"type":"message","id":"u1","parentId":null,"message":{"role":"user","timestamp":1700000000000,"content":"hello"}}"#,
+            r#"{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-08-12T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"private\n**Inspecting source**"},{"type":"toolCall","id":"call-1","name":"read","arguments":{"path":"a.txt"}},{"type":"thinking","thinking":"more private\n**Running checks**"},{"type":"text","text":"Done."}],"stopReason":"stop"}}"#,
+        ]
+        .into_iter()
+        .flat_map(|line| PiAdapter.normalize_line(line))
+        .collect::<Vec<_>>();
+        let visible = ingest_provider_records(&mut state, &PiAdapter, records, true);
+        let messages = visible
+            .iter()
+            .filter_map(|record| match &record.payload {
+                crate::api::schema::conversations::ConversationItemPayload::AssistantMessage {
+                    text,
+                    ..
+                } => Some((record.native_id.as_deref(), text.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            messages,
+            vec![
+                (Some("progress:a1:0"), "Inspecting source"),
+                (Some("progress:a1:1"), "Running checks"),
+                (Some("message:turn:1700000000000:1786492801000"), "Done."),
+            ]
+        );
+        assert!(!format!("{messages:?}").contains("private"));
     }
 
     #[test]

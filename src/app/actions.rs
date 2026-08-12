@@ -250,6 +250,7 @@ pub struct PaneStateUpdate {
     pub seen: bool,
     pub presentation: crate::terminal::EffectivePresentation,
     pub agent_name_changed: bool,
+    pub agent_arguments_changed: bool,
     pub agent_released: bool,
     pub agent_release_status: Option<crate::api::schema::AgentStatus>,
     pub suppress_completion: bool,
@@ -1055,6 +1056,7 @@ impl AppState {
                     seen,
                     presentation: change.presentation.clone(),
                     agent_name_changed: false,
+                    agent_arguments_changed: false,
                     agent_released: false,
                     agent_release_status: None,
                     suppress_completion: false,
@@ -2779,10 +2781,15 @@ impl AppState {
             AppEvent::AgentProcessDetected {
                 pane_id,
                 agent,
+                agent_has_arguments,
                 observed_at,
             } => self
                 .update_terminal_state(pane_id, |terminal| {
-                    Some(terminal.set_detected_agent_process_at(agent, observed_at))
+                    Some(terminal.set_detected_agent_process_at(
+                        agent,
+                        agent_has_arguments,
+                        observed_at,
+                    ))
                 })
                 .into_iter()
                 .collect(),
@@ -3033,29 +3040,39 @@ impl AppState {
             mutation,
             managed_changed,
             agent_name_changed,
+            agent_arguments_changed,
             unchanged_change,
             managed_launch_pending,
             suppress_acquisition_completion,
         ) = {
             let terminal = self.terminals.get_mut(&terminal_id)?;
             let previous_agent_name = terminal.agent_name.clone();
+            let previous_agent_has_arguments = terminal.agent_has_arguments;
             let managed_launch_pending = terminal.managed_agent_launch_pending();
             let mutation = update(terminal)?;
             let managed_changed = terminal.reconcile_managed_agent_at(now, false);
             let suppress_acquisition_completion = terminal.finish_agent_process_acquisition();
             let agent_name_changed = terminal.agent_name != previous_agent_name;
-            let unchanged_change = (mutation.agent_released || agent_name_changed)
-                .then(|| terminal.unchanged_effective_state_change_at(now));
+            let agent_arguments_changed =
+                terminal.agent_has_arguments != previous_agent_has_arguments;
+            let unchanged_change =
+                (mutation.agent_released || agent_name_changed || agent_arguments_changed)
+                    .then(|| terminal.unchanged_effective_state_change_at(now));
             (
                 mutation,
                 managed_changed,
                 agent_name_changed,
+                agent_arguments_changed,
                 unchanged_change,
                 managed_launch_pending,
                 suppress_acquisition_completion,
             )
         };
-        if mutation.session_ref_changed || managed_changed || agent_name_changed {
+        if mutation.session_ref_changed
+            || managed_changed
+            || agent_name_changed
+            || agent_arguments_changed
+        {
             self.mark_session_dirty();
         }
         let agent_released = mutation.agent_released;
@@ -3093,6 +3110,7 @@ impl AppState {
             seen,
             presentation: change.presentation.clone(),
             agent_name_changed,
+            agent_arguments_changed,
             agent_released,
             agent_release_status: agent_released.then(|| pane_agent_status(change.state, seen)),
             suppress_completion,
@@ -5065,6 +5083,31 @@ mod tests {
     }
 
     #[test]
+    fn changed_agent_arguments_produce_a_pane_update() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        state.handle_app_event(AppEvent::AgentProcessDetected {
+            pane_id,
+            agent: Agent::Pi,
+            agent_has_arguments: Some(false),
+            observed_at: Instant::now(),
+        });
+
+        let update = state
+            .handle_app_event(AppEvent::AgentProcessDetected {
+                pane_id,
+                agent: Agent::Pi,
+                agent_has_arguments: Some(true),
+                observed_at: Instant::now(),
+            })
+            .pop()
+            .expect("argument-only pane update");
+
+        assert!(update.agent_arguments_changed);
+        assert!(!update.agent_name_changed);
+    }
+
+    #[test]
     fn first_idle_after_process_detection_is_not_completion() {
         let mut state = app_with_workspaces(&["active", "background"]);
         state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
@@ -5074,6 +5117,7 @@ mod tests {
         state.handle_app_event(AppEvent::AgentProcessDetected {
             pane_id,
             agent: Agent::Pi,
+            agent_has_arguments: Some(false),
             observed_at: Instant::now(),
         });
         let direct_idle = state
@@ -5093,6 +5137,7 @@ mod tests {
         state.handle_app_event(AppEvent::AgentProcessDetected {
             pane_id,
             agent: Agent::Pi,
+            agent_has_arguments: Some(false),
             observed_at: Instant::now(),
         });
         for agent_state in [AgentState::Working, AgentState::Blocked] {
@@ -5129,6 +5174,7 @@ mod tests {
         state.handle_app_event(AppEvent::AgentProcessDetected {
             pane_id,
             agent: Agent::Codex,
+            agent_has_arguments: Some(false),
             observed_at: Instant::now(),
         });
         state.handle_app_event(AppEvent::StateChanged {

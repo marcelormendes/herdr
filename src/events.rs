@@ -60,6 +60,7 @@ pub enum AppEvent {
     AgentProcessDetected {
         pane_id: PaneId,
         agent: Agent,
+        agent_has_arguments: Option<bool>,
         observed_at: Instant,
     },
     /// Fallback detector state changed in a pane.
