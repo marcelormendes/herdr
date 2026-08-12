@@ -1460,8 +1460,11 @@ fn append_durable_at(
     }) {
         let revision = state.content_revision.saturating_add(1);
         let mut changed_sequence = None;
+        let mut replaced_sequence = None;
         let mut completed_paths = Vec::new();
         let mut tool_native_id = None;
+        let reconciled_overlay = state.log.get(index).is_some_and(|entry| entry.overlay);
+        let reorder_overlay = reconciled_overlay && index + 1 < state.log.len();
         if let Some(entry) = state.log.get_mut(index) {
             let payload = merge_payload(&entry.payload, &record.payload);
             if entry.payload != payload
@@ -1493,8 +1496,32 @@ fn append_durable_at(
                 changed_sequence = Some(entry.sequence);
             }
         }
+        if reorder_overlay {
+            let mut entry = state
+                .log
+                .remove(index)
+                .expect("the matched overlay index must remain valid");
+            replaced_sequence = Some(entry.sequence);
+            entry.sequence = state.max_sequence.saturating_add(1);
+            state.max_sequence = entry.sequence;
+            changed_sequence = Some(entry.sequence);
+            state.log.push_back(entry);
+            state.min_sequence = state
+                .log
+                .front()
+                .map(|entry| entry.sequence)
+                .unwrap_or(state.max_sequence);
+        }
         if let Some(sequence) = changed_sequence {
             state.content_revision = revision;
+            if let Some(replaced) = replaced_sequence {
+                state
+                    .change_log
+                    .retain(|(_, changed_sequence)| *changed_sequence != replaced);
+            }
+            if reconciled_overlay {
+                refresh_overlay_bytes(state);
+            }
             remember_change(state, sequence);
             for (index, path) in completed_paths.into_iter().enumerate() {
                 let file_id = tool_native_id
@@ -2301,6 +2328,87 @@ mod tests {
             ConversationItemPayload::FileChange { path, .. } if path == "src/chat.ts"
         )));
         assert!(state.content_revision > before);
+    }
+
+    #[test]
+    fn durable_rows_restore_transcript_order_around_live_tool_overlays() {
+        let mut state = test_state();
+        append_overlay(
+            &mut state,
+            "session",
+            &OverlayRecord {
+                native_id: Some("call-1".into()),
+                entry_id: Some("assistant-1".into()),
+                timestamp_ms: Some(2),
+                turn_id: Some("turn-1".into()),
+                payload: ConversationItemPayload::ToolActivity {
+                    action: "edit".into(),
+                    label: "running".into(),
+                    status: ToolStatus::Running,
+                    preview: None,
+                    detail: None,
+                    duration_ms: None,
+                    paths: Vec::new(),
+                },
+            },
+        );
+        append_durable(
+            &mut state,
+            "session",
+            &NativeRecord {
+                native_id: Some("progress:assistant-1:0".into()),
+                entry_id: Some("assistant-1".into()),
+                parent_id: Some("user-1".into()),
+                timestamp_ms: Some(1),
+                turn_id: Some("turn-1".into()),
+                payload: ConversationItemPayload::AssistantMessage {
+                    phase: crate::api::schema::conversations::AssistantMessagePhase::Commentary,
+                    text: "Updating the file".into(),
+                    state: crate::api::schema::conversations::CompletionState::Completed,
+                },
+                topology_only: false,
+                anchor: 1,
+            },
+            1,
+        );
+        append_durable(
+            &mut state,
+            "session",
+            &NativeRecord {
+                native_id: Some("call-1".into()),
+                entry_id: Some("assistant-1".into()),
+                parent_id: Some("user-1".into()),
+                timestamp_ms: Some(2),
+                turn_id: Some("turn-1".into()),
+                payload: ConversationItemPayload::ToolActivity {
+                    action: "edit".into(),
+                    label: "completed".into(),
+                    status: ToolStatus::Completed,
+                    preview: None,
+                    detail: None,
+                    duration_ms: Some(1),
+                    paths: Vec::new(),
+                },
+                topology_only: false,
+                anchor: 2,
+            },
+            2,
+        );
+
+        let rows = state
+            .log
+            .iter()
+            .filter_map(|entry| match &entry.payload {
+                ConversationItemPayload::AssistantMessage { text, .. } => Some(text.as_str()),
+                ConversationItemPayload::ToolActivity { action, .. } => Some(action.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec!["Updating the file", "edit"]);
+        assert!(state
+            .change_log
+            .iter()
+            .all(|(_, sequence)| state.log.iter().any(|entry| entry.sequence == *sequence)));
     }
 
     #[test]
