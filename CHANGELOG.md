@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.8.2] - 2026-08-11
+
 ### Fixed
 - Structured Chat now preserves OMP progress headings between tool calls without exposing private reasoning or collapsing multiple headings into one message.
 - Agent process metadata now reports whether the detected command has native arguments and refreshes clients when that value changes.
