@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import net, { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -433,6 +433,205 @@ test("OMP publishes live tool and approval overlays", async () => {
   expect(typeof planIds[0] === "string" && planIds[0].startsWith("plan:")).toBe(true);
 });
 
+test("OMP keeps scheduling pauses active until the terminal agent end", async () => {
+  const requests = await startRecordingServer("omp-terminal-settlement");
+  process.env.HERDR_OMP_IDLE_DEBOUNCE_MS = "0";
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./omp/herdr-agent-state.ts");
+  install(pi);
+  const context = {
+    hasUI: true,
+    isIdle: () => false,
+    sessionManager: {
+      getSessionFile: () => "/tmp/omp-terminal-settlement.jsonl",
+      getSessionId: () => "omp-terminal-settlement",
+    },
+  };
+  const turnStates = () =>
+    requests
+      .filter(
+        (request) =>
+          isRecord(request) &&
+          request.method === "agent.conversation.report" &&
+          isRecord(request.params) &&
+          isRecord(request.params.payload) &&
+          request.params.payload.type === "turn_state",
+      )
+      .map((request) =>
+        isRecord(request) && isRecord(request.params) && isRecord(request.params.payload)
+          ? request.params.payload.state
+          : undefined,
+      );
+
+  handlers.get("session_start")?.({ reason: "startup" }, context);
+  handlers.get("agent_start")?.({}, context);
+  handlers.get("message_start")?.(
+    {
+      message: {
+        role: "user",
+        content: "Run the checks.",
+        timestamp: 1_700_000_000_000,
+      },
+    },
+    context,
+  );
+  await waitFor(() => turnStates().includes("started"));
+
+  handlers.get("agent_end")?.({ isTerminal: false, messages: [] }, context);
+  handlers.get("tool_execution_start")?.(
+    { toolCallId: "after-pause", toolName: "bash", args: { command: "true" } },
+    context,
+  );
+  await waitFor(() =>
+    requests.some(
+      (request) =>
+        isRecord(request) &&
+        isRecord(request.params) &&
+        request.params.native_id === "after-pause",
+    ),
+  );
+  expect(turnStates()).toEqual(["started"]);
+  expect(requestStates(requests).at(-1)).toBe("working");
+
+  handlers.get("agent_end")?.({ isTerminal: true, messages: [] }, context);
+  await waitFor(
+    () => turnStates().at(-1) === "completed" && requestStates(requests).at(-1) === "idle",
+  );
+  expect(turnStates()).toEqual(["started", "completed"]);
+});
+
+test("OMP reports the terminal status metadata used by Chat", async () => {
+  const requests = await startRecordingServer("omp-status-metadata");
+  const { handlers, pi } = createExtensionHarness();
+  Object.assign(pi, { getThinkingLevel: () => "xhigh" });
+  const { default: install } = await importFresh("./omp/herdr-agent-state.ts");
+  install(pi);
+  const context = {
+    hasUI: true,
+    isIdle: () => true,
+    cwd: "/tmp/omp-project",
+    model: { name: "GPT-5.6-Sol" },
+    modelRegistry: { isUsingOAuth: () => true },
+    getContextUsage: () => ({ tokens: 121_856, contextWindow: 272_000, percent: 44.8 }),
+    sessionManager: {
+      getSessionFile: () => "/tmp/omp-status-metadata.jsonl",
+      getSessionId: () => "omp-status-metadata",
+      getSessionName: () => "Fix TODO above workspace",
+      getCwd: () => "/tmp/omp-project",
+      getUsageStatistics: () => ({
+        input: 100_000,
+        output: 20_000,
+        cacheRead: 1_856,
+        cacheWrite: 0,
+        totalTokens: 121_856,
+        orchestrationInput: 0,
+        orchestrationOutput: 0,
+        orchestrationCacheRead: 0,
+        premiumRequests: 0,
+        cost: 182.54,
+      }),
+    },
+  };
+
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() =>
+    requests.some(
+      (request) => isRecord(request) && request.method === "pane.report_metadata",
+    ),
+  );
+  const report = requests.find(
+    (request) => isRecord(request) && request.method === "pane.report_metadata",
+  );
+  expect(isRecord(report) && isRecord(report.params) && report.params.tokens).toEqual(
+    expect.objectContaining({
+      model: "GPT-5.6-Sol",
+      thinking: "xhigh",
+      cwd: "/tmp/omp-project",
+      context_percent: "44.8",
+      context_tokens: "121856",
+      context_window: "272000",
+      input_tokens: "100000",
+      output_tokens: "20000",
+      cache_read_tokens: "1856",
+      cost: "182.54",
+      subscription: "true",
+      session_name: "Fix TODO above workspace",
+    }),
+  );
+});
+
+test("OMP refreshes Git metadata after workspace tools complete", async () => {
+  const repo = await mkdtemp(join(tmpdir(), "herdr-omp-metadata-"));
+  try {
+    const initialize = Bun.spawn(["git", "init", "--initial-branch=metadata", repo], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    expect(await initialize.exited).toBe(0);
+    await writeFile(join(repo, "tracked.txt"), "staged\n");
+    const add = Bun.spawn(["git", "-C", repo, "add", "tracked.txt"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    expect(await add.exited).toBe(0);
+    await writeFile(join(repo, "tracked.txt"), "staged and unstaged\n");
+    await writeFile(join(repo, "untracked.txt"), "one\n");
+
+    const requests = await startRecordingServer("omp-git-metadata");
+    const { handlers, pi } = createExtensionHarness();
+    const { default: install } = await importFresh("./omp/herdr-agent-state.ts");
+    install(pi);
+    const context = {
+      hasUI: true,
+      isIdle: () => true,
+      cwd: repo,
+      sessionManager: {
+        getSessionFile: () => join(repo, "omp.jsonl"),
+        getSessionId: () => "omp-git-metadata",
+        getCwd: () => repo,
+      },
+    };
+    const metadataReports = () =>
+      requests.filter(
+        (request) => isRecord(request) && request.method === "pane.report_metadata",
+      );
+    const latestUntrackedCount = () => {
+      const report = metadataReports().at(-1);
+      if (!isRecord(report) || !isRecord(report.params) || !isRecord(report.params.tokens)) {
+        return undefined;
+      }
+      return report.params.tokens.git_untracked;
+    };
+
+    await handlers.get("session_start")?.({ reason: "startup" }, context);
+    await waitFor(() => metadataReports().length > 0);
+    const initialReport = metadataReports().at(-1);
+    expect(
+      isRecord(initialReport) &&
+        isRecord(initialReport.params) &&
+        initialReport.params.tokens,
+    ).toEqual(
+      expect.objectContaining({
+        git_branch: "metadata",
+        git_staged: "1",
+        git_unstaged: "1",
+        git_untracked: "1",
+      }),
+    );
+
+    await writeFile(join(repo, "second-untracked.txt"), "two\n");
+    const reportCount = metadataReports().length;
+    handlers
+      .get("tool_execution_end")
+      ?.({ toolCallId: "call-1", toolName: "bash", result: { success: true } }, context);
+    await waitFor(
+      () => metadataReports().length > reportCount && latestUntrackedCount() === "2",
+    );
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
 test("OMP re-reports a session after its lazily created transcript is flushed", async () => {
   const requests = await startRecordingServer("omp-lazy-transcript");
   const { handlers, pi } = createExtensionHarness();
@@ -733,15 +932,20 @@ test("Oh My Pi retries working before a queued idle state", async () => {
   handlers.get("session_start")?.({ reason: "startup" }, context);
   handlers.get("agent_end")?.({ messages: [] }, context);
 
+  const stateRequests = () =>
+    attemptedRequests.filter(
+      (request) => isRecord(request) && request.method === "pane.report_agent",
+    );
   const deadline = Date.now() + 2_500;
-  while (Date.now() < deadline && attemptedRequests.length < 3) {
+  while (Date.now() < deadline && stateRequests().length < 3) {
     await Bun.sleep(5);
   }
 
-  expect(attemptedRequests).toHaveLength(3);
-  expect(attemptedRequests[1]).toEqual(attemptedRequests[0]);
-  expect(requestState(attemptedRequests[0])).toBe("working");
-  expect(requestState(attemptedRequests[2])).toBe("idle");
+  const attempts = stateRequests();
+  expect(attempts).toHaveLength(3);
+  expect(attempts[1]).toEqual(attempts[0]);
+  expect(requestState(attempts[0])).toBe("working");
+  expect(requestState(attempts[2])).toBe("idle");
 });
 
 test("Pi retries working state after an unanswered socket attempt", async () => {

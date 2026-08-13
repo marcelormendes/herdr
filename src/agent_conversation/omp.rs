@@ -211,4 +211,31 @@ mod tests {
         let edit = serde_json::json!({"type":"message","id":"r3","parentId":"p1","message":{"role":"toolResult","toolCallId":"edit-1","content":"ok","details":{"op":"edit","path":"src/app.ts"},"isError":false}}).to_string();
         assert!(OmpAdapter.normalize_line(&edit).iter().any(|record| matches!(record.payload, ConversationItemPayload::FileChange { ref path, .. } if path == "src/app.ts")));
     }
+
+    #[test]
+    fn omp_adapter_preserves_final_answers_larger_than_the_tool_text_limit() {
+        let text = "x".repeat(12 * 1024);
+        let line = serde_json::json!({
+            "type": "message",
+            "id": "answer-1",
+            "parentId": "prompt-1",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": text}],
+                "stopReason": "stop"
+            }
+        })
+        .to_string();
+
+        let records = OmpAdapter.normalize_line(&line);
+
+        assert!(records.iter().any(|record| matches!(
+            &record.payload,
+            ConversationItemPayload::AssistantMessage {
+                phase: crate::api::schema::conversations::AssistantMessagePhase::Final,
+                text: answer,
+                ..
+            } if answer.len() == 12 * 1024
+        )));
+    }
 }

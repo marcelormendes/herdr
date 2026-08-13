@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::agent_conversation::{
     cap_text, safe_display_path, tool_command_preview, validate_under_root, NativeRecord,
     ProviderAdapter, SourceFingerprint, TranscriptError, MAX_DETAIL_BYTES, MAX_ITEMS_PER_PAGE,
-    MAX_TEXT_BYTES,
+    MAX_MESSAGE_TEXT_BYTES, MAX_TEXT_BYTES,
 };
 use crate::api::schema::conversations::{
     AssistantMessagePhase, ConversationItemPayload, FileChangeKind, PlanStep, PlanStepStatus,
@@ -108,7 +108,7 @@ fn normalize_response_item(value: &Value) -> Vec<NativeRecord> {
                             timestamp,
                             turn_id.clone(),
                             ConversationItemPayload::UserMessage {
-                                text: cap_text(&text, MAX_TEXT_BYTES),
+                                text: cap_text(&text, MAX_MESSAGE_TEXT_BYTES),
                                 attachments: Vec::new(),
                             },
                         )
@@ -130,7 +130,7 @@ fn normalize_response_item(value: &Value) -> Vec<NativeRecord> {
                     turn_id,
                     ConversationItemPayload::AssistantMessage {
                         phase,
-                        text: cap_text(&text, MAX_TEXT_BYTES),
+                        text: cap_text(&text, MAX_MESSAGE_TEXT_BYTES),
                         state: crate::api::schema::conversations::CompletionState::Completed,
                     },
                 )];

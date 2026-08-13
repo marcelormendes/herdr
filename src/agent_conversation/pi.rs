@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::agent_conversation::{
     cap_text, safe_display_path_under_root, tool_command_preview, validate_under_root,
     NativeRecord, ProviderAdapter, SourceFingerprint, TranscriptError, MAX_ITEMS_PER_PAGE,
-    MAX_TEXT_BYTES,
+    MAX_MESSAGE_TEXT_BYTES, MAX_TEXT_BYTES,
 };
 use crate::api::schema::conversations::{
     AssistantMessagePhase, AttachmentMetadata, CompletionState, ConversationItemPayload, PlanStep,
@@ -296,7 +296,7 @@ fn normalize_assistant(
             None,
             ConversationItemPayload::AssistantMessage {
                 phase,
-                text: cap_text(&text, MAX_TEXT_BYTES),
+                text: cap_text(&text, MAX_MESSAGE_TEXT_BYTES),
                 state,
             },
         ));
@@ -379,7 +379,7 @@ fn text_and_attachments(content: Option<&Value>) -> (String, Vec<AttachmentMetad
         _ => {}
     }
     (
-        cap_text(&text, MAX_TEXT_BYTES),
+        cap_text(&text, MAX_MESSAGE_TEXT_BYTES),
         attachments.into_iter().take(16).collect(),
     )
 }

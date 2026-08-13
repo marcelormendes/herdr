@@ -25,6 +25,7 @@ use crate::api::schema::conversations::{
 pub const MAX_SCAN_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_ITEMS_PER_PAGE: usize = 256;
 pub const MAX_TEXT_BYTES: usize = 8 * 1024;
+pub const MAX_MESSAGE_TEXT_BYTES: usize = 256 * 1024;
 pub const MAX_DETAIL_BYTES: usize = 16 * 1024;
 pub const MAX_PATHS_PER_ITEM: usize = 64;
 pub const MAX_PAGE_BYTES: usize = 512 * 1024;
@@ -1225,7 +1226,7 @@ fn bounded_payload(payload: &ConversationItemPayload) -> ConversationItemPayload
         ConversationItemPayload::UserMessage { text, attachments } => {
             let (text, injected_attachments) = split_engine_attachment_trailer(text);
             ConversationItemPayload::UserMessage {
-                text: cap_display_text(&text, MAX_TEXT_BYTES),
+                text: cap_display_text(&text, MAX_MESSAGE_TEXT_BYTES),
                 attachments: attachments
                     .iter()
                     .map(
@@ -1243,7 +1244,7 @@ fn bounded_payload(payload: &ConversationItemPayload) -> ConversationItemPayload
         ConversationItemPayload::AssistantMessage { phase, text, state } => {
             ConversationItemPayload::AssistantMessage {
                 phase: *phase,
-                text: cap_display_text(text, MAX_TEXT_BYTES),
+                text: cap_display_text(text, MAX_MESSAGE_TEXT_BYTES),
                 state: *state,
             }
         }
