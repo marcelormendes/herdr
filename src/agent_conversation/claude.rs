@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::agent_conversation::{
     cap_text, safe_display_path, tool_command_preview, validate_under_root, NativeRecord,
-    ProviderAdapter, SourceFingerprint, TranscriptError, MAX_TEXT_BYTES,
+    ProviderAdapter, SourceFingerprint, TranscriptError, MAX_MESSAGE_TEXT_BYTES, MAX_TEXT_BYTES,
 };
 use crate::api::schema::conversations::{
     AssistantMessagePhase, CompletionState, ConversationItemPayload, ToolStatus, TurnStateKind,
@@ -128,7 +128,7 @@ fn normalize_user(
                 parent,
                 timestamp,
                 ConversationItemPayload::UserMessage {
-                    text: cap_text(&text, MAX_TEXT_BYTES),
+                    text: cap_text(&text, MAX_MESSAGE_TEXT_BYTES),
                     attachments: Vec::new(),
                 },
             ));
@@ -143,7 +143,7 @@ fn normalize_user(
                     parent,
                     timestamp,
                     ConversationItemPayload::UserMessage {
-                        text: cap_text(text, MAX_TEXT_BYTES),
+                        text: cap_text(text, MAX_MESSAGE_TEXT_BYTES),
                         attachments: Vec::new(),
                     },
                 )
@@ -242,7 +242,7 @@ fn normalize_assistant(
             timestamp,
             ConversationItemPayload::AssistantMessage {
                 phase,
-                text: cap_text(&text, MAX_TEXT_BYTES),
+                text: cap_text(&text, MAX_MESSAGE_TEXT_BYTES),
                 state,
             },
         ));

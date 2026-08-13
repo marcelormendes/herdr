@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## [0.8.4] - 2026-08-12
+
+### Added
+- OMP integrations now report live model, thinking level, context usage, cost, working directory, and Git status metadata for Structured Chat clients.
+
+### Fixed
+- OMP lifecycle reporting now distinguishes non-terminal scheduling pauses from terminal completion, preventing completed turns from remaining in Working.
+- Structured Chat now preserves assistant and user messages up to 256 KiB instead of truncating them at the 8 KiB tool-text limit.
+
 ## [0.8.3] - 2026-08-12
 
 ### Fixed

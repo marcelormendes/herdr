@@ -2,9 +2,10 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=omp
-// HERDR_INTEGRATION_VERSION=13
+// HERDR_INTEGRATION_VERSION=15
 // @ts-nocheck
 
+import { execFile } from "node:child_process";
 import net from "node:net";
 import path from "node:path";
 
@@ -166,7 +167,7 @@ function liveId(value: unknown, fallback: string): string {
   return typeof value === "string" && value.length > 0 && value.length <= 256 ? value : fallback;
 }
 
-function isRecord(value: unknown): value is Record<string, any> {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
@@ -356,6 +357,189 @@ function reportSession(sessionStartSource = "startup"): Promise<void> {
       ...sessionRef,
     },
   });
+}
+
+const gitTokenKeys = ["git_branch", "git_staged", "git_unstaged", "git_untracked"] as const;
+let metadataQueue = Promise.resolve();
+let currentGitTokens = emptyGitTokens();
+
+function emptyGitTokens(): Record<(typeof gitTokenKeys)[number], string | null> {
+  return {
+    git_branch: null,
+    git_staged: null,
+    git_unstaged: null,
+    git_untracked: null,
+  };
+}
+
+function boundedMetadataValue(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0) {
+    return null;
+  }
+  return value.slice(0, 256);
+}
+
+function numericMetadataValue(value: unknown): string | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? String(value)
+    : null;
+}
+
+function gitBranch(header: string): string | null {
+  const value = header.slice(3);
+  for (const prefix of ["No commits yet on ", "Initial commit on "]) {
+    if (value.startsWith(prefix)) {
+      return boundedMetadataValue(value.slice(prefix.length));
+    }
+  }
+  if (value.startsWith("HEAD (no branch)")) {
+    return "HEAD";
+  }
+  return boundedMetadataValue(value.split("...")[0]?.split(" [")[0]);
+}
+
+function parseGitStatus(output: string): Record<(typeof gitTokenKeys)[number], string | null> {
+  const lines = output.split(/\r?\n/);
+  const tokens = emptyGitTokens();
+  if (lines[0]?.startsWith("## ")) {
+    tokens.git_branch = gitBranch(lines.shift()!);
+  }
+  let staged = 0;
+  let unstaged = 0;
+  let untracked = 0;
+  for (const line of lines) {
+    if (line.startsWith("??")) {
+      untracked += 1;
+      continue;
+    }
+    if (line.length < 2 || line.startsWith("!!")) {
+      continue;
+    }
+    if (line[0] !== " ") {
+      staged += 1;
+    }
+    if (line[1] !== " ") {
+      unstaged += 1;
+    }
+  }
+  tokens.git_staged = String(staged);
+  tokens.git_unstaged = String(unstaged);
+  tokens.git_untracked = String(untracked);
+  return tokens;
+}
+
+function readGitStatus(cwd: string): Promise<string | undefined> {
+  const { promise, resolve } = Promise.withResolvers<string | undefined>();
+  execFile(
+    "git",
+    ["-C", cwd, "status", "--porcelain=v1", "--branch", "--untracked-files=normal"],
+    { encoding: "utf8", maxBuffer: 256 * 1024, timeout: 1_500 },
+    (error, stdout) => resolve(error ? undefined : stdout),
+  );
+  return promise;
+}
+
+function recordValue(value: unknown, key: string): unknown {
+  return isRecord(value) ? value[key] : undefined;
+}
+
+function callMethod(value: unknown, key: string, ...args: unknown[]): unknown {
+  const method = recordValue(value, key);
+  if (typeof method !== "function") {
+    return undefined;
+  }
+  try {
+    return Reflect.apply(method, value, args);
+  } catch {
+    return undefined;
+  }
+}
+
+function currentThinkingLevel(pi: unknown, ctx: unknown): string | null {
+  const level = callMethod(pi, "getThinkingLevel");
+  if (typeof level === "string") {
+    return boundedMetadataValue(level);
+  }
+  const sessionManager = recordValue(ctx, "sessionManager");
+  const branch = callMethod(sessionManager, "getBranch");
+  if (!Array.isArray(branch)) {
+    return null;
+  }
+  for (let index = branch.length - 1; index >= 0; index -= 1) {
+    const entry = branch[index];
+    if (recordValue(entry, "type") === "thinking_level_change") {
+      return boundedMetadataValue(recordValue(entry, "thinkingLevel") ?? "off");
+    }
+  }
+  return null;
+}
+
+async function metadataTokens(
+  pi: unknown,
+  ctx: unknown,
+  refreshGit: boolean,
+): Promise<Record<string, string | null>> {
+  const sessionManager = recordValue(ctx, "sessionManager");
+  const directCwd = recordValue(ctx, "cwd");
+  const fallbackCwd = callMethod(sessionManager, "getCwd");
+  const cwd =
+    typeof directCwd === "string"
+      ? directCwd
+      : typeof fallbackCwd === "string"
+        ? fallbackCwd
+        : undefined;
+  if (refreshGit) {
+    const output = cwd ? await readGitStatus(cwd) : undefined;
+    currentGitTokens = output === undefined ? emptyGitTokens() : parseGitStatus(output);
+  }
+
+  const directModel = recordValue(ctx, "model");
+  const models = recordValue(ctx, "models");
+  const model = isRecord(directModel) ? directModel : callMethod(models, "current");
+  const contextUsage = callMethod(ctx, "getContextUsage");
+  const usage = callMethod(sessionManager, "getUsageStatistics");
+  const sessionName = callMethod(sessionManager, "getSessionName");
+  const modelRegistry = recordValue(ctx, "modelRegistry");
+  const subscription = Boolean(model && callMethod(modelRegistry, "isUsingOAuth", model));
+
+  return {
+    model: boundedMetadataValue(recordValue(model, "name") ?? recordValue(model, "id")),
+    thinking: currentThinkingLevel(pi, ctx),
+    cwd: boundedMetadataValue(cwd),
+    context_percent: numericMetadataValue(recordValue(contextUsage, "percent")),
+    context_tokens: numericMetadataValue(recordValue(contextUsage, "tokens")),
+    context_window: numericMetadataValue(recordValue(contextUsage, "contextWindow")),
+    input_tokens: numericMetadataValue(recordValue(usage, "input")),
+    output_tokens: numericMetadataValue(recordValue(usage, "output")),
+    cache_read_tokens: numericMetadataValue(recordValue(usage, "cacheRead")),
+    cost: numericMetadataValue(recordValue(usage, "cost")),
+    premium_requests: numericMetadataValue(recordValue(usage, "premiumRequests")),
+    subscription: subscription ? "true" : "false",
+    session_name: boundedMetadataValue(sessionName),
+    ...currentGitTokens,
+  };
+}
+
+function queueMetadata(pi: unknown, ctx: unknown, refreshGit = false): void {
+  const publish = async () => {
+    const tokens = await metadataTokens(pi, ctx, refreshGit);
+    await sendRequest({
+      id: `${source}:metadata:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      method: "pane.report_metadata",
+      params: {
+        pane_id: paneId,
+        source,
+        agent: "omp",
+        tokens,
+        seq: nextReportSeq(),
+      },
+    });
+  };
+  metadataQueue = metadataQueue.then(publish, publish);
+}
+
+function toolMayChangeWorkspace(toolName: unknown): boolean {
+  return ["bash", "edit", "write", "eval"].includes(String(toolName ?? "").toLowerCase());
 }
 
 function sendState(state: AgentState, message?: string, seq = nextReportSeq()): Promise<void> {
@@ -689,7 +873,12 @@ export default function (pi) {
     }
   });
   pi.on("message_update", (event) => reportMessage(event, "commentary"));
-  pi.on("message_end", (event) => reportMessage(event, "final"));
+  pi.on("message_end", (event, ctx) => {
+    reportMessage(event, "final");
+    if (rootSession) {
+      queueMetadata(pi, ctx);
+    }
+  });
 
   function holdForRetry(message: string) {
     clearPendingTimers();
@@ -714,6 +903,7 @@ export default function (pi) {
     rootSession = true;
     updateSessionRef(ctx);
     void reportSession(sessionStartSource);
+    queueMetadata(pi, ctx, true);
     return true;
   }
 
@@ -797,6 +987,7 @@ export default function (pi) {
     messageOrdinal = 0;
     agentActive = true;
     publishState();
+    queueMetadata(pi, ctx);
   });
 
   pi.on("tool_approval_requested", (event, ctx) => {
@@ -838,6 +1029,9 @@ export default function (pi) {
       event?.result?.success === false ||
       event?.success === false;
     reportTool(event, failed ? "failed" : "completed");
+    if (toolMayChangeWorkspace(event?.toolName)) {
+      queueMetadata(pi, ctx, true);
+    }
     if (event?.toolName !== "ask") {
       return;
     }
@@ -848,8 +1042,14 @@ export default function (pi) {
     if (!rootSession) {
       return;
     }
+    // OMP emits non-terminal end events for scheduling pauses that will
+    // continue automatically. Only the terminal event settles the Chat turn.
+    if (event?.isTerminal === false) {
+      return;
+    }
     updateSessionRef(ctx);
     void reportSession();
+    queueMetadata(pi, ctx, true);
     if (!agentActive) {
       // OMP can emit duplicate/late end events while auto-retry is already
       // holding the pane in Working. Do not let an unqualified duplicate end
