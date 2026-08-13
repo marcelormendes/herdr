@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## [0.8.5] - 2026-08-13
+
+### Fixed
+- OMP integrations now publish an empty plan update when a TODO is cleared, so Structured Chat removes stale pinned TODOs immediately.
+
 ## [0.8.4] - 2026-08-12
 
 ### Added

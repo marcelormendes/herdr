@@ -386,6 +386,10 @@ test("OMP publishes live tool and approval overlays", async () => {
     { toolCallId: "todo-2", toolName: "todo", args: { phases: [{ name: "Checks", items: [{ label: "Review output", status: "active" }] }] } },
     context,
   );
+  handlers.get("tool_execution_start")?.(
+    { toolCallId: "todo-clear", toolName: "todo", args: { phases: [] } },
+    context,
+  );
   handlers.get("tool_approval_requested")?.(
     { toolCallId: "approval-1", reason: "Allow Edit?" },
     context,
@@ -418,19 +422,28 @@ test("OMP publishes live tool and approval overlays", async () => {
         request.params.payload.status === "failed",
     ),
   ).toBe(true);
-  const planIds = requests
-    .filter(
-      (request) =>
-        isRecord(request) &&
-        request.method === "agent.conversation.report" &&
-        isRecord(request.params) &&
-        isRecord(request.params.payload) &&
-        request.params.payload.type === "plan_update",
-    )
-    .map((request) => (isRecord(request) ? request.params?.native_id : undefined));
-  expect(planIds.length).toBeGreaterThanOrEqual(2);
+  const planReports = requests.filter(
+    (request) =>
+      isRecord(request) &&
+      request.method === "agent.conversation.report" &&
+      isRecord(request.params) &&
+      isRecord(request.params.payload) &&
+      request.params.payload.type === "plan_update",
+  );
+  const planIds = planReports.map((request) =>
+    isRecord(request) ? request.params?.native_id : undefined,
+  );
+  expect(planIds.length).toBeGreaterThanOrEqual(3);
   expect(new Set(planIds).size).toBe(1);
   expect(typeof planIds[0] === "string" && planIds[0].startsWith("plan:")).toBe(true);
+  const lastPlanReport = planReports.at(-1);
+  expect(
+    isRecord(lastPlanReport) &&
+      isRecord(lastPlanReport.params) &&
+      isRecord(lastPlanReport.params.payload)
+      ? lastPlanReport.params.payload.steps
+      : undefined,
+  ).toEqual([]);
 });
 
 test("OMP keeps scheduling pauses active until the terminal agent end", async () => {

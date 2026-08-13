@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=omp
-// HERDR_INTEGRATION_VERSION=15
+// HERDR_INTEGRATION_VERSION=16
 // @ts-nocheck
 
 import { execFile } from "node:child_process";
@@ -793,11 +793,12 @@ export default function (pi) {
       `tool:${activeTurnId}:${toolName}`,
     );
     const input = tool?.args ?? tool?.arguments ?? tool?.input;
-    const steps = toolName === "todo" || toolName === "plan" ? livePlanSteps(input) : [];
+    const planTool = toolName === "todo" || toolName === "plan";
+    const steps = planTool ? livePlanSteps(input) : [];
     void reportConversation(
-      steps.length > 0 ? `plan:${activeTurnId}` : toolId,
+      planTool ? `plan:${activeTurnId}` : toolId,
       activeTurnId,
-      steps.length > 0
+      planTool
         ? { type: "plan_update", steps }
         : {
             type: "tool_activity",
