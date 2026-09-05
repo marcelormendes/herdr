@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=omp
-// HERDR_INTEGRATION_VERSION=16
+// HERDR_INTEGRATION_VERSION=17
 // @ts-nocheck
 
 import { execFile } from "node:child_process";
@@ -512,6 +512,8 @@ async function metadataTokens(
     input_tokens: numericMetadataValue(recordValue(usage, "input")),
     output_tokens: numericMetadataValue(recordValue(usage, "output")),
     cache_read_tokens: numericMetadataValue(recordValue(usage, "cacheRead")),
+    cache_write_tokens: numericMetadataValue(recordValue(usage, "cacheWrite")),
+    usage_scope: isRecord(usage) ? "session" : null,
     cost: numericMetadataValue(recordValue(usage, "cost")),
     premium_requests: numericMetadataValue(recordValue(usage, "premiumRequests")),
     subscription: subscription ? "true" : "false",
@@ -523,17 +525,27 @@ async function metadataTokens(
 function queueMetadata(pi: unknown, ctx: unknown, refreshGit = false): void {
   const publish = async () => {
     const tokens = await metadataTokens(pi, ctx, refreshGit);
-    await sendRequest({
-      id: `${source}:metadata:${Date.now()}:${Math.random().toString(36).slice(2)}`,
-      method: "pane.report_metadata",
-      params: {
-        pane_id: paneId,
-        source,
-        agent: "omp",
-        tokens,
-        seq: nextReportSeq(),
-      },
-    });
+    // The public API accepts at most 16 token keys per report. Keep session
+    // usage together and send Git independently rather than rejecting both.
+    const statusTokens = Object.fromEntries(
+      Object.entries(tokens).filter(([key]) => !key.startsWith("git_")),
+    );
+    const gitTokens = Object.fromEntries(
+      Object.entries(tokens).filter(([key]) => key.startsWith("git_")),
+    );
+    for (const batch of [statusTokens, gitTokens]) {
+      await sendRequest({
+        id: `${source}:metadata:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        method: "pane.report_metadata",
+        params: {
+          pane_id: paneId,
+          source,
+          agent: "omp",
+          tokens: batch,
+          seq: nextReportSeq(),
+        },
+      });
+    }
   };
   metadataQueue = metadataQueue.then(publish, publish);
 }

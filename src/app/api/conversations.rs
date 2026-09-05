@@ -9,6 +9,30 @@ use crate::app::App;
 use super::responses::{encode_error, encode_error_body, encode_success};
 
 impl App {
+    pub(super) fn apply_conversation_metadata_patch(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        patch: std::collections::HashMap<String, Option<String>>,
+    ) {
+        if patch.is_empty() {
+            return;
+        }
+        let Some((ws_idx, pane)) = self.find_pane(pane_id) else {
+            return;
+        };
+        let terminal_id = pane.attached_terminal_id.clone();
+        let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
+            return;
+        };
+        if terminal
+            .metadata_tokens
+            .patch(patch, None, std::time::Instant::now())
+        {
+            terminal.revision = terminal.revision.saturating_add(1);
+            self.emit_pane_updated(ws_idx, pane_id);
+        }
+    }
+
     pub(super) fn handle_agent_conversation_read(
         &mut self,
         id: String,
@@ -100,6 +124,12 @@ impl App {
             );
         };
 
+        self.sync_conversation_cache_for_pane(resolved.pane_id);
+        let current_tokens = self
+            .find_pane(resolved.pane_id)
+            .and_then(|(_, pane)| self.state.terminals.get(&pane.attached_terminal_id))
+            .map(|terminal| terminal.metadata_tokens.values())
+            .unwrap_or_default();
         let reader = self
             .conversation_readers
             .entry(resolved.pane_id)
@@ -130,6 +160,11 @@ impl App {
                 params.limit,
             )
         };
+        let metadata_patch = reader.take_metadata_patch(
+            outcome.reset || outcome.capability_reason.is_some(),
+            &current_tokens,
+        );
+        self.apply_conversation_metadata_patch(resolved.pane_id, metadata_patch);
         if outcome.reset {
             return encode_success(
                 id,
@@ -525,5 +560,107 @@ fn safe_reason_message(reason: ConversationReasonCode) -> &'static str {
             "structured Chat is not supported for this provider"
         }
         ConversationReasonCode::Ready => "structured Chat is ready",
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::api::schema::{ConversationPageDirection, PaneReportAgentSessionParams};
+    use crate::config::Config;
+    use crate::detect::{Agent, AgentState};
+    use crate::workspace::Workspace;
+
+    #[test]
+    fn native_metadata_reaches_pane_tokens_and_session_clear_retracts_it() {
+        let _guard = crate::integration::integration_env_lock();
+        let base =
+            std::env::temp_dir().join(format!("herdr-native-metadata-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("session.jsonl");
+        std::fs::write(&path, concat!(
+            "{\"type\":\"model_change\",\"id\":\"m\",\"parentId\":null,\"modelId\":\"native-model\"}\n",
+            "{\"type\":\"message\",\"id\":\"a\",\"parentId\":\"m\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"usage\":{\"input\":12,\"output\":0}}}\n",
+        )).unwrap();
+        let old = std::env::var_os("PI_CODING_AGENT_DIR");
+        std::env::set_var("PI_CODING_AGENT_DIR", &base);
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("native metadata")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let public = app.public_pane_id(0, pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .unwrap()
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.integration_token = Some("test-token".into());
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        terminal.metadata_tokens.patch(
+            std::collections::HashMap::from([("git_branch".into(), Some("main".into()))]),
+            None,
+            std::time::Instant::now(),
+        );
+        app.handle_pane_report_agent_session(
+            "session".into(),
+            PaneReportAgentSessionParams {
+                pane_id: public.clone(),
+                source: "herdr:pi".into(),
+                agent: "pi".into(),
+                seq: Some(1),
+                agent_session_id: None,
+                agent_session_path: Some(path.to_string_lossy().into()),
+                session_start_source: Some("startup".into()),
+                integration_token: Some("test-token".into()),
+            },
+        );
+        let params = || AgentConversationReadParams {
+            target: public.clone(),
+            cursor: None,
+            direction: ConversationPageDirection::Newest,
+            limit: 10,
+        };
+        let response = app.handle_agent_conversation_read("read".into(), params());
+        let result: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(result.get("error").is_none(), "{response}");
+        let info = app.pane_info(0, pane_id).unwrap();
+        assert_eq!(info.tokens["model"], "native-model");
+        assert_eq!(info.tokens["input_tokens"], "12");
+        assert_eq!(info.tokens["output_tokens"], "0");
+        assert_eq!(info.tokens["usage_scope"], "last_response");
+        let revision = info.revision;
+        app.handle_agent_conversation_read("unchanged".into(), params());
+        assert_eq!(app.pane_info(0, pane_id).unwrap().revision, revision);
+        // A later explicit report owns its value even when the native source
+        // is subsequently retired. Only still-native values are retracted.
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .metadata_tokens
+            .patch(
+                std::collections::HashMap::from([("model".into(), Some("user-override".into()))]),
+                None,
+                std::time::Instant::now(),
+            );
+        app.state.conversation_sources.clear(pane_id);
+        app.sync_conversation_cache_for_pane(pane_id);
+        let info = app.pane_info(0, pane_id).unwrap();
+        assert_eq!(info.tokens["model"], "user-override");
+        assert!(!info.tokens.contains_key("input_tokens"));
+        assert_eq!(info.tokens["git_branch"], "main");
+        if let Some(old) = old {
+            std::env::set_var("PI_CODING_AGENT_DIR", old);
+        } else {
+            std::env::remove_var("PI_CODING_AGENT_DIR");
+        }
+        let _ = std::fs::remove_dir_all(base);
     }
 }

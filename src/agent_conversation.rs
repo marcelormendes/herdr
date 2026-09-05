@@ -7,6 +7,7 @@
 pub mod claude;
 pub mod codex;
 pub mod jsonl;
+mod metadata;
 pub mod omp;
 pub mod pi;
 
@@ -267,6 +268,7 @@ fn random_handle() -> String {
 }
 
 pub struct SourceReaderState {
+    metadata: metadata::MetadataState,
     pub fingerprint: SourceFingerprint,
     pub tail_offset: u64,
     pub tail_at_boundary: bool,
@@ -305,6 +307,7 @@ impl SourceReaderState {
     fn new(fingerprint: SourceFingerprint, limits: ReaderLimits) -> Self {
         Self {
             fingerprint,
+            metadata: metadata::MetadataState::default(),
             tail_offset: 0,
             tail_at_boundary: true,
             older_anchor: 0,
@@ -366,6 +369,7 @@ pub struct ReaderOutcome {
 }
 
 pub struct ConversationReader {
+    published_metadata: HashMap<String, Option<String>>,
     provider: crate::detect::Agent,
     session: String,
     generation: String,
@@ -400,6 +404,7 @@ impl ConversationReader {
         limits: ReaderLimits,
     ) -> Self {
         Self {
+            published_metadata: HashMap::new(),
             provider,
             session,
             generation: format!("{engine_seed}-{cache_generation}"),
@@ -426,6 +431,44 @@ impl ConversationReader {
 
     pub fn provider_name(&self) -> &'static str {
         self.adapter().provider_name()
+    }
+
+    /// Only publish changed allowlisted facts; resets retract the previous
+    /// session's values without clearing unrelated integration metadata.
+    pub(crate) fn take_metadata_patch(
+        &mut self,
+        clear: bool,
+        current_tokens: &HashMap<String, String>,
+    ) -> HashMap<String, Option<String>> {
+        let tree_provider = self.provider_name() == "pi";
+        let current = if clear {
+            HashMap::new()
+        } else {
+            self.state
+                .as_mut()
+                .map(|state| {
+                    state
+                        .metadata
+                        .values(tree_provider.then_some(&state.active_entry_ids))
+                })
+                .unwrap_or_default()
+        };
+        let mut patch = HashMap::new();
+        for key in self.published_metadata.keys() {
+            if !current.contains_key(key)
+                && self.published_metadata.get(key).and_then(Option::as_ref)
+                    == current_tokens.get(key)
+            {
+                patch.insert(key.clone(), None);
+            }
+        }
+        for (key, value) in &current {
+            if self.published_metadata.get(key) != Some(value) {
+                patch.insert(key.clone(), value.clone());
+            }
+        }
+        self.published_metadata = current;
+        patch
     }
 
     pub fn read_metadata(&mut self, transcript: &TranscriptRef) -> ReaderOutcome {
@@ -2072,6 +2115,48 @@ mod tests {
             std::env::remove_var("PI_CODING_AGENT_DIR");
         }
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_metadata_follows_complete_records_and_is_retracted_on_reset() {
+        use std::io::Write;
+        with_pi_fixture(|path| {
+            let model =
+                r#"{"type":"model_change","id":"m","parentId":null,"modelId":"reported-model"}"#;
+            let usage = r#"{"type":"message","id":"a","parentId":"m","message":{"role":"assistant","model":"reported-model","content":[{"type":"text","text":"done"}],"usage":{"input":10,"output":0}}}"#;
+            std::fs::write(path, format!("{model}\n{usage}")).unwrap();
+            let transcript = TranscriptRef::new("pi", path).unwrap();
+            let mut reader = ConversationReader::new(crate::detect::Agent::Pi, "s".into(), "g", 1);
+            assert!(reader.read_metadata(&transcript).page.is_some());
+            let first = reader.take_metadata_patch(false, &HashMap::new());
+            assert_eq!(first.get("model"), Some(&Some("reported-model".into())));
+            assert!(!first.contains_key("input_tokens"));
+            assert!(reader
+                .take_metadata_patch(false, &HashMap::new())
+                .is_empty());
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .unwrap()
+                .write_all(b"\n")
+                .unwrap();
+            assert!(reader.read_metadata(&transcript).page.is_some());
+            let next = reader.take_metadata_patch(false, &HashMap::new());
+            assert_eq!(next.get("input_tokens"), Some(&Some("10".into())));
+            assert_eq!(next.get("output_tokens"), Some(&Some("0".into())));
+            assert_eq!(next.get("usage_scope"), Some(&Some("last_response".into())));
+            std::fs::write(path, "").unwrap();
+            assert!(reader.read_metadata(&transcript).reset);
+            let current_tokens = HashMap::from([
+                ("model".into(), "reported-model".into()),
+                ("input_tokens".into(), "10".into()),
+            ]);
+            let cleared = reader.take_metadata_patch(true, &current_tokens);
+            assert_eq!(cleared.get("model"), Some(&None));
+            assert_eq!(cleared.get("input_tokens"), Some(&None));
+            assert!(!cleared.contains_key("git_branch"));
+        });
     }
 
     #[cfg(unix)]

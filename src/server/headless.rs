@@ -4644,6 +4644,8 @@ impl HeadlessServer {
         // No resize polling needed — server has no terminal.
         // Client resize messages drive size changes instead.
 
+        changed |= self.app.reconcile_due_managed_agents(now);
+
         if self
             .app
             .config_diagnostic_deadline
@@ -7276,6 +7278,45 @@ next_tab = ""
                 Bytes::from_static(b"\x1b[5~")
             );
         });
+    }
+
+    #[test]
+    fn headless_scheduled_tasks_finish_idle_managed_agent_launches() {
+        for kind in [crate::detect::Agent::Pi, crate::detect::Agent::Omp] {
+            let mut server = test_headless_server();
+            let workspace = crate::workspace::Workspace::test_new("managed");
+            let pane_id = workspace.tabs[0].root_pane;
+            let terminal_id = workspace.terminal_id(pane_id).cloned().unwrap();
+            server.app.state.workspaces = vec![workspace];
+            server.app.state.ensure_test_terminals();
+            let now = Instant::now();
+            let settle_delay = Duration::from_millis(100);
+            let terminal = server.app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.begin_managed_agent(
+                "ready-agent".into(),
+                kind,
+                now,
+                settle_delay,
+                Duration::from_secs(1),
+            );
+            terminal.set_detected_state(Some(kind), crate::detect::AgentState::Idle);
+            // Idle arrives before the settle deadline, with no subsequent PTY event.
+            terminal.reconcile_managed_agent_at(now, false);
+            assert!(terminal.managed_agent_launch_pending());
+
+            assert!(server.handle_scheduled_tasks_headless(now + settle_delay, false));
+            let terminal = server.app.state.terminals.get(&terminal_id).unwrap();
+            assert!(terminal.managed_agent_interactive_ready());
+            assert!(!terminal.managed_agent_launch_pending());
+            assert_eq!(terminal.next_managed_agent_deadline(), None);
+            assert!(server.app.state.session_dirty);
+            assert!(server
+                .app
+                .event_hub
+                .events_after(0)
+                .iter()
+                .any(|(_, event)| { event.event == api::schema::EventKind::PaneUpdated }));
+        }
     }
 
     #[test]

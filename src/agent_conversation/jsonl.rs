@@ -45,6 +45,9 @@ pub fn scan_for_page(
                 size,
                 display_root,
             )?;
+            state
+                .metadata
+                .ingest(window.metadata, state.limits.max_log_entries);
             let records = ingest_provider_records(state, adapter, window.records, true);
             for record in records {
                 let anchor = record.anchor;
@@ -66,6 +69,9 @@ pub fn scan_for_page(
                 size,
                 display_root,
             )?;
+            state
+                .metadata
+                .ingest(window.metadata, state.limits.max_log_entries);
             let records = ingest_provider_records(state, adapter, window.records, true);
             for record in records {
                 let anchor = record.anchor;
@@ -103,6 +109,9 @@ pub fn scan_for_page(
             size,
             display_root,
         )?;
+        state
+            .metadata
+            .ingest(window.metadata, state.limits.max_log_entries);
         let records = ingest_provider_records(state, adapter, window.records, false);
         for record in records.into_iter().rev() {
             let anchor = record.anchor;
@@ -700,6 +709,7 @@ fn remember_entry_parent(
 }
 
 struct Window {
+    metadata: Vec<(u64, super::metadata::MetadataRecord)>,
     records: Vec<NativeRecord>,
     complete_end: u64,
     older_anchor: u64,
@@ -782,6 +792,7 @@ fn read_window(
             let oversized = bytes.len() >= MAX_RECORD_BYTES;
             return Ok(Window {
                 records: Vec::new(),
+                metadata: Vec::new(),
                 complete_end: if oversized { end } else { start },
                 older_anchor: start,
                 next_tail_boundary: oversized,
@@ -790,6 +801,7 @@ fn read_window(
     }
 
     let mut records = Vec::new();
+    let mut metadata = Vec::new();
     let mut complete_end = effective_start;
     while cursor < bytes.len() {
         let Some(relative_end) = bytes[cursor..].iter().position(|byte| *byte == b'\n') else {
@@ -806,6 +818,9 @@ fn read_window(
         let Ok(text) = std::str::from_utf8(line) else {
             continue;
         };
+        if let Some(record) = super::metadata::normalize(adapter.provider_name(), text) {
+            metadata.push((line_start, record));
+        }
         let mut normalized = adapter.normalize_line_for_display(text, display_root);
         for record in &mut normalized {
             record.anchor = line_start;
@@ -826,6 +841,7 @@ fn read_window(
     }
     Ok(Window {
         records,
+        metadata,
         complete_end,
         older_anchor: effective_start,
         next_tail_boundary: trailing_len == 0 || trailing_oversized,

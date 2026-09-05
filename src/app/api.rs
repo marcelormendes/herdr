@@ -152,7 +152,17 @@ impl App {
                 .is_some_and(|reader| reader.session_id() == session)
         });
         if !reader_matches {
-            self.conversation_readers.remove(&pane_id);
+            if let Some(mut reader) = self.conversation_readers.remove(&pane_id) {
+                let current_tokens = self
+                    .find_pane(pane_id)
+                    .and_then(|(_, pane)| self.state.terminals.get(&pane.attached_terminal_id))
+                    .map(|terminal| terminal.metadata_tokens.values())
+                    .unwrap_or_default();
+                self.apply_conversation_metadata_patch(
+                    pane_id,
+                    reader.take_metadata_patch(true, &current_tokens),
+                );
+            }
             self.conversation_report_sequences.remove(&pane_id);
         }
     }
