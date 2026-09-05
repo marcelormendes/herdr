@@ -13,6 +13,8 @@ env:
 
 jobs:
   close:
+    # Upstream issue IDs and the maintainer token do not apply to forks.
+    if: github.repository == 'herdrdev/herdr'
     runs-on: ubuntu-latest
 
     steps:
