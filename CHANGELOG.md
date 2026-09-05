@@ -8,6 +8,8 @@
 - Headless managed agents now finish their readiness delay even when no further terminal output arrives, preventing stuck startup state and a busy scheduler loop.
 - Structured Chat exposes validated native Pi, Codex, and Claude session metadata through pane tokens, with explicit usage scope and safe cleanup when a session changes.
 - OMP integration metadata reports stay within the API field limit so model, effort, usage, and working-directory updates reach clients.
+- Loading older history no longer republishes unchanged completed tools into the live conversation stream.
+- Nix builds fetch checksum-verified crates from the official static CDN to avoid rate-limited API downloads.
 
 ## [0.8.5] - 2026-08-13
 

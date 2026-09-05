@@ -1628,12 +1628,16 @@ fn prepend_durable(
         let mut changed = false;
         if let Some(entry) = state.log.get_mut(index) {
             let payload = merge_payload(&record.payload, &entry.payload);
+            // Backfill is older than the retained entry. A completed tool can
+            // span multiple native rows; replaying its start must not replace
+            // the result timestamp and publish a spurious live-tail delta.
+            let timestamp_ms = entry.timestamp_ms.or(record.timestamp_ms);
             if entry.payload != payload
-                || entry.timestamp_ms != record.timestamp_ms.or(entry.timestamp_ms)
+                || entry.timestamp_ms != timestamp_ms
                 || (entry.turn_id.is_none() && record.turn_id.is_some())
             {
                 entry.payload = payload;
-                entry.timestamp_ms = record.timestamp_ms.or(entry.timestamp_ms);
+                entry.timestamp_ms = timestamp_ms;
                 if entry.turn_id.is_none() {
                     entry.turn_id = record.turn_id.clone();
                 }
@@ -2156,6 +2160,72 @@ mod tests {
             assert_eq!(cleared.get("model"), Some(&None));
             assert_eq!(cleared.get("input_tokens"), Some(&None));
             assert!(!cleared.contains_key("git_branch"));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn history_rescan_does_not_publish_unchanged_tools_to_live_cursor() {
+        with_pi_fixture(|path| {
+            let mut rows = Vec::new();
+            let mut parent = None::<String>;
+            for turn in 0..6 {
+                for (suffix, message) in [
+                    (
+                        "user",
+                        serde_json::json!({"role":"user","content":format!("turn {turn}")}),
+                    ),
+                    (
+                        "start",
+                        serde_json::json!({"role":"assistant","content":[{"type":"toolCall","id":format!("call-{turn}"),"name":"bash","arguments":{"command":"printf fixture"}}],"stopReason":"toolUse"}),
+                    ),
+                    (
+                        "result",
+                        serde_json::json!({"role":"toolResult","toolCallId":format!("call-{turn}"),"toolName":"bash","content":[{"type":"text","text":"fixture output"}],"isError":false}),
+                    ),
+                    (
+                        "final",
+                        serde_json::json!({"role":"assistant","content":[{"type":"text","text":"done"}],"stopReason":"stop"}),
+                    ),
+                ] {
+                    let id = format!("{turn}-{suffix}");
+                    rows.push(serde_json::json!({"type":"message","id":id,"parentId":parent,"timestamp":format!("2026-09-05T00:00:{:02}.000Z", rows.len()),"message":message}).to_string());
+                    parent = Some(id);
+                }
+            }
+            std::fs::write(path, format!("{}\n", rows.join("\n"))).unwrap();
+            let transcript = TranscriptRef::new("pi", path).unwrap();
+            let mut reader =
+                ConversationReader::new(crate::detect::Agent::Pi, "history-rescan".into(), "g", 1);
+            let newest = reader
+                .read(&transcript, None, ConversationPageDirection::Newest, 4)
+                .page
+                .unwrap();
+            let older = reader
+                .read(
+                    &transcript,
+                    newest.previous_cursor.as_deref(),
+                    ConversationPageDirection::Older,
+                    4,
+                )
+                .page
+                .unwrap();
+            assert_eq!(older.items.len(), 4);
+            assert!(older.has_older);
+            let delta = reader
+                .read(
+                    &transcript,
+                    newest.next_cursor.as_deref(),
+                    ConversationPageDirection::Newer,
+                    256,
+                )
+                .page
+                .unwrap();
+            assert!(
+                delta.items.is_empty(),
+                "unchanged historical tools leaked into live delta: {:?}",
+                delta.items
+            );
         });
     }
 
