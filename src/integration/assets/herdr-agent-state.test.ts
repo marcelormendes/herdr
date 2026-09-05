@@ -322,11 +322,15 @@ test("Pi publishes bounded live conversation overlays", async () => {
   );
   eventHandlers.get("herdr:blocked")?.({ active: true, label: "Allow Edit?" }, context);
 
-  await waitFor(
-    () =>
-      requests.filter(
-        (request) => isRecord(request) && request.method === "agent.conversation.report",
-      ).length >= 4,
+  await waitFor(() =>
+    requests.some(
+      (request) =>
+        isRecord(request) &&
+        request.method === "agent.conversation.report" &&
+        isRecord(request.params) &&
+        isRecord(request.params.payload) &&
+        request.params.payload.type === "approval",
+    ),
   );
   const payloadTypes = requests
     .filter((request) => isRecord(request) && request.method === "agent.conversation.report")
