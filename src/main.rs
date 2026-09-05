@@ -131,6 +131,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Accepts: hex (#rrggbb), named colors, rgb(r,g,b), or panel_bg = "reset"
 # [theme.custom]
 # sidebar_bg = "#181825"
+# active_row_bg = "#1e1e2e"
+# selection_bg = "#313244"
 # panel_bg = "reset"
 # accent = "#f5c2e7"
 # red = "#ff6188"
@@ -152,8 +154,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 [update]
 # Update channel used by background version checks and `herdr update`.
-# Defaults to "stable" on Linux/macOS and "preview" on Windows.
-# Set explicitly to choose stable releases or opt-in preview builds.
+# Stable builds default to "stable". Windows preview builds default to "preview"
+# so existing preview installs stay there until explicitly switched.
 # channel = "stable"
 
 # Check herdr.dev for new Herdr versions in the background.
@@ -250,6 +252,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # tabs = ""       # e.g. "ctrl" makes ctrl+1..9 switch tabs directly
 # workspaces = "" # e.g. "ctrl+shift" makes ctrl+shift+1..9 switch workspaces directly
 # agents = ""     # e.g. "alt" makes alt+1..9 focus agent rows directly
+
+# Size of the virtual terminal used when no client is attached.
+# Attached clients always use their own terminal size.
+[server]
+# headless_cols = 120
+# headless_rows = 40
 
 # [worktrees]
 # directory = "~/.herdr/worktrees"
@@ -451,7 +459,8 @@ pane_history = false
 # matches one of these names. Empty means apply to any focused pane.
 # If the list contains no valid names, the reveal does not apply.
 # Accepted: pi, claude, codex, gemini, cursor, devin, cline, opencode,
-# copilot, kimi, kiro, droid, amp, grok, hermes, kilo, qodercli, qoder.
+# copilot, kimi, kiro, droid, amp, grok, hermes, kilo, qodercli, qoder, qwen,
+# qwen-code, maki.
 # cjk_ime_agents = []
 # Cursor shape rendered when reveal_hidden_cursor_for_cjk_ime is true.
 # Values: block, steady_block (default), underline, steady_underline, bar, steady_bar.
@@ -606,6 +615,7 @@ fn main() -> io::Result<()> {
     }
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
+        platform::begin_cli_output();
         println!("herdr — terminal workspace manager for AI coding agents");
         println!();
         println!("Usage: herdr [options]");
@@ -715,21 +725,25 @@ fn main() -> io::Result<()> {
         println!("Logs:   {}", logging::help_log_paths_summary());
         println!("Env:    HERDR_CONFIG_PATH overrides config file path");
         println!("Home:   https://herdr.dev");
-        println!("Skill:  herdr --skill prints agent instructions for driving herdr from a pane");
+        println!();
+        println!("{}", cli::AGENT_HELP_FOOTER);
         return Ok(());
     }
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
+        platform::begin_cli_output();
         println!("herdr {}", crate::build_info::version());
         return Ok(());
     }
 
     if args.iter().any(|a| a == "--default-config") {
+        platform::begin_cli_output();
         print!("{DEFAULT_CONFIG}");
         return Ok(());
     }
 
     if args.iter().any(|a| a == "--skill") {
+        platform::begin_cli_output();
         print!("{SKILL}");
         return Ok(());
     }

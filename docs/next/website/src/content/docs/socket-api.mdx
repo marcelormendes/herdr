@@ -111,7 +111,7 @@ Raw socket method names use dot notation:
 | Integrations | `integration.install`, `integration.uninstall` |
 | Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
 
-`agent.wait` is server-owned and event-driven. It pins the resolved pane occupant so a replacement cannot satisfy the wait. `agent.prompt` accepts an optional `wait` object with `until` and `timeout_ms`; this submits the prompt and starts the wait in one request, avoiding a race between separate calls.
+`agent.wait` is server-owned and event-driven. It pins the resolved pane occupant so a replacement cannot satisfy the wait. `agent.prompt` accepts an optional `wait` object with `until` and `timeout_ms`; this submits the prompt and starts the wait in one request, avoiding a race between separate calls. If the resolved agent is already `blocked`, `agent.prompt` returns `agent_blocked` without sending input or starting the wait.
 
 `workspace.move_block` atomically moves the ordered `workspace_ids` before `before_workspace_id`; omit the anchor to move the block to the end. The ids must be unique and the anchor cannot be part of the block. The response contains the authoritative ordered workspace list.
 
@@ -221,6 +221,13 @@ acknowledging source reuse. Monolithic `--no-session` mode advertises neither
 fast file transport nor exact pixel mouse and remains on owned inline fallback.
 
 Direct files are always complete canonical `width * height * 4` RGBA frames.
+`file_frame_max_bytes` is the limit that remains eligible for owned inline fallback.
+Primary-layer RGBA files may use the larger `file_frame_direct_max_bytes` limit when
+`file_frame_transport` is available. Frames above the fallback limit are acknowledged
+only when the terminal accepts the direct transfer; rejection closes the stream. If a
+frame cannot use owned inline fallback while its pane is temporarily hidden or cannot be
+placed during a redraw, Herdr uploads the image without displaying it and replays its
+placement when the pane becomes visible again.
 `file_frame_damage: true` means Herdr accepts optional damage metadata for
 producer-side canonical-ring efficiency; it still copies or presents the full file.
 Resize and full redraw replay placements without retransmitting pixels.

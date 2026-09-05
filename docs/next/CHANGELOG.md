@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+## [0.8.7] - 2026-09-05
+
+### Changed
+- Integrated upstream Herdr stable v0.8.2 (52 commits since the fork baseline), retaining the fork's structured conversation API, native metadata, history continuity, and protocol 20 compatibility.
+- Headless panes use upstream's configurable 120x40 default virtual terminal geometry.
+
+### Fixed
+- Incorporated upstream fixes for redundant terminal wakeups, hidden-pane render cadence, alternate-screen history reads, managed shell readiness, and invoking the running engine from agent hooks.
+- Agent prompts now reject blocked approval or question dialogs without sending input, while retaining the fork's attachment support.
+
+## [0.8.6] - 2026-09-05
+
+### Fixed
+- Headless managed agents now finish their readiness delay even when no further terminal output arrives, preventing stuck startup state and a busy scheduler loop.
+- Structured Chat exposes validated native Pi, Codex, and Claude session metadata through pane tokens, with explicit usage scope and safe cleanup when a session changes.
+- OMP integration metadata reports stay within the API field limit so model, effort, usage, and working-directory updates reach clients.
+- Loading older history no longer republishes unchanged completed tools into the live conversation stream.
+- Nix builds fetch checksum-verified crates from the official static CDN to avoid rate-limited API downloads.
+
+## [0.8.5] - 2026-08-13
+
+### Fixed
+- OMP integrations now publish an empty plan update when a TODO is cleared, so Structured Chat removes stale pinned TODOs immediately.
+
+## [0.8.4] - 2026-08-12
+
+### Added
+- OMP integrations now report live model, thinking level, context usage, cost, working directory, and Git status metadata for Structured Chat clients.
+
+### Fixed
+- OMP lifecycle reporting now distinguishes non-terminal scheduling pauses from terminal completion, preventing completed turns from remaining in Working.
+- Structured Chat now preserves assistant and user messages up to 256 KiB instead of truncating them at the 8 KiB tool-text limit.
+
 ## [0.8.3] - 2026-08-12
 
 ### Fixed

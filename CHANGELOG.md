@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## [0.8.7] - 2026-09-05
+
+### Changed
+- Integrated upstream Herdr stable v0.8.2 (52 commits since the fork baseline), retaining the fork's structured conversation API, native metadata, history continuity, and protocol 20 compatibility.
+- Headless panes use upstream's configurable 120x40 default virtual terminal geometry.
+
+### Fixed
+- Incorporated upstream fixes for redundant terminal wakeups, hidden-pane render cadence, alternate-screen history reads, managed shell readiness, and invoking the running engine from agent hooks.
+- Agent prompts now reject blocked approval or question dialogs without sending input, while retaining the fork's attachment support.
+
 ## [0.8.6] - 2026-09-05
 
 ### Fixed

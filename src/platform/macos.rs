@@ -26,6 +26,10 @@ pub(crate) fn should_draw_host_cursor_by_default() -> bool {
     false
 }
 
+pub(crate) fn should_query_host_terminal_palette() -> bool {
+    true
+}
+
 fn raw_command_argv(command: &str, flag: &str) -> Vec<std::ffi::OsString> {
     vec!["/bin/sh".into(), flag.into(), command.into()]
 }
@@ -518,14 +522,14 @@ pub fn read_clipboard_text() -> Option<String> {
     }
 }
 
-pub fn open_url(url: &str) -> std::io::Result<()> {
+pub fn open_url(url: &str) -> std::io::Result<Option<std::process::Child>> {
     Command::new("open")
         .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()?;
-    Ok(())
+        .spawn()
+        .map(Some)
 }
 
 pub fn read_clipboard_image() -> Option<ClipboardImage> {

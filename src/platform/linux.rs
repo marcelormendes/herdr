@@ -41,6 +41,10 @@ pub(crate) fn should_draw_host_cursor_by_default() -> bool {
     running_inside_wsl()
 }
 
+pub(crate) fn should_query_host_terminal_palette() -> bool {
+    !running_inside_wsl()
+}
+
 fn running_inside_wsl() -> bool {
     proc_file_indicates_wsl("/proc/sys/kernel/osrelease")
         || proc_file_indicates_wsl("/proc/version")
@@ -462,14 +466,14 @@ pub fn read_clipboard_text() -> Option<String> {
     None
 }
 
-pub fn open_url(url: &str) -> std::io::Result<()> {
+pub fn open_url(url: &str) -> std::io::Result<Option<std::process::Child>> {
     Command::new("xdg-open")
         .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()?;
-    Ok(())
+        .spawn()
+        .map(Some)
 }
 
 pub fn read_clipboard_image() -> Option<ClipboardImage> {
