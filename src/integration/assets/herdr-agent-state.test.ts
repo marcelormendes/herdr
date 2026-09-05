@@ -547,13 +547,20 @@ test("OMP reports the terminal status metadata used by Chat", async () => {
   };
 
   await handlers.get("session_start")?.({ reason: "startup" }, context);
-  await waitFor(() =>
-    requests.some(
-      (request) => isRecord(request) && request.method === "pane.report_metadata",
-    ),
-  );
-  const report = requests.find(
+  const metadataReports = () => requests.filter(
     (request) => isRecord(request) && request.method === "pane.report_metadata",
+  );
+  await waitFor(() => metadataReports().length >= 2);
+  const reports = metadataReports();
+  for (const report of reports) {
+    expect(isRecord(report) && isRecord(report.params) && isRecord(report.params.tokens)).toBe(true);
+    if (isRecord(report) && isRecord(report.params) && isRecord(report.params.tokens)) {
+      expect(Object.keys(report.params.tokens).length).toBeLessThanOrEqual(16);
+    }
+  }
+  const report = reports[0];
+  expect(isRecord(reports[0]) && isRecord(reports[0].params) && reports[0].params.seq).toBeLessThan(
+    isRecord(reports[1]) && isRecord(reports[1].params) && reports[1].params.seq,
   );
   expect(isRecord(report) && isRecord(report.params) && report.params.tokens).toEqual(
     expect.objectContaining({
@@ -566,6 +573,8 @@ test("OMP reports the terminal status metadata used by Chat", async () => {
       input_tokens: "100000",
       output_tokens: "20000",
       cache_read_tokens: "1856",
+      cache_write_tokens: "0",
+      usage_scope: "session",
       cost: "182.54",
       subscription: "true",
       session_name: "Fix TODO above workspace",
@@ -617,7 +626,7 @@ test("OMP refreshes Git metadata after workspace tools complete", async () => {
     };
 
     await handlers.get("session_start")?.({ reason: "startup" }, context);
-    await waitFor(() => metadataReports().length > 0);
+    await waitFor(() => latestUntrackedCount() === "1");
     const initialReport = metadataReports().at(-1);
     expect(
       isRecord(initialReport) &&

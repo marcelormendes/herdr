@@ -2,6 +2,7 @@
   lib,
   stdenv,
   rustPlatform,
+  fetchurl,
   callPackage,
   runCommand,
   zig_0_15,
@@ -53,7 +54,16 @@ rustPlatform.buildRustPackage {
     );
   };
 
-  cargoLock = {
+  # Match newer Nixpkgs: use the official CDN directly instead of the
+  # rate-limited crates.io API. importCargoLock still verifies every lock hash.
+  cargoDeps = (rustPlatform.importCargoLock.override {
+    fetchurl = args: fetchurl (args // {
+      url = lib.replaceStrings
+        [ "https://crates.io/api/v1/crates/" ]
+        [ "https://static.crates.io/crates/" ]
+        args.url;
+    });
+  }) {
     lockFile = ../Cargo.lock;
   };
 

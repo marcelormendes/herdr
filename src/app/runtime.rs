@@ -287,6 +287,25 @@ impl App {
         false
     }
 
+    pub(crate) fn reconcile_due_managed_agents(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        if self
+            .state
+            .next_managed_agent_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            let panes = self.state.reconcile_managed_agents_at(now);
+            if !panes.is_empty() {
+                for (ws_idx, pane_id) in panes {
+                    self.emit_pane_updated(ws_idx, pane_id);
+                }
+                self.schedule_session_save();
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub(crate) fn handle_scheduled_tasks(&mut self, now: Instant, geometry_dirty: bool) -> bool {
         let mut changed = false;
         let mut resized = false;
@@ -327,20 +346,7 @@ impl App {
             }
         }
 
-        if self
-            .state
-            .next_managed_agent_deadline()
-            .is_some_and(|deadline| now >= deadline)
-        {
-            let panes = self.state.reconcile_managed_agents_at(now);
-            if !panes.is_empty() {
-                for (ws_idx, pane_id) in panes {
-                    self.emit_pane_updated(ws_idx, pane_id);
-                }
-                self.schedule_session_save();
-                changed = true;
-            }
-        }
+        changed |= self.reconcile_due_managed_agents(now);
 
         if self
             .copy_feedback_deadline

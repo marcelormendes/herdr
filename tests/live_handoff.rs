@@ -59,9 +59,10 @@ fn spawn_server_with_env(
 ) -> SpawnedHerdr {
     fs::create_dir_all(config_home.join("herdr")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
+    // Keep fixture PATH ordering; macOS login profiles can select an installed agent.
     fs::write(
         config_home.join("herdr/config.toml"),
-        "onboarding = false\n",
+        "onboarding = false\n[terminal]\nshell_mode = \"non_login\"\n",
     )
     .unwrap();
 
@@ -76,6 +77,8 @@ fn spawn_server_with_env(
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
+    // Debug binaries otherwise look under herdr-dev and ignore this fixture config.
+    cmd.env("HERDR_CONFIG_PATH", config_home.join("herdr/config.toml"));
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket);
     cmd.env(
@@ -1231,7 +1234,7 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
     fs::write(
         &fake_pi,
         format!(
-            "#!/bin/sh\nexport HERDR_AGENT=pi\nprintf '%s' \"$HERDR_INTEGRATION_TOKEN\" > {}\necho started > {}\nexec /bin/sleep 30\n",
+            "#!/bin/sh\nexport HERDR_AGENT=pi\nprintf '%s' \"$HERDR_INTEGRATION_TOKEN\" > {}\necho started > {}\n/bin/sleep 30\nexit 0\n",
             token_marker.display(),
             started_marker.display()
         ),
