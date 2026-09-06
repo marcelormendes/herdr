@@ -517,6 +517,62 @@ test("OMP keeps scheduling pauses active until the terminal agent end", async ()
   expect(turnStates()).toEqual(["started", "completed"]);
 });
 
+test("OMP ignores late assistant callbacks after settlement and during the next turn", async () => {
+  const requests = await startRecordingServer("omp-late-messages");
+  process.env.HERDR_OMP_IDLE_DEBOUNCE_MS = "0";
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./omp/herdr-agent-state.ts");
+  install(pi);
+  const context = {
+    hasUI: true,
+    isIdle: () => false,
+    sessionManager: {
+      getSessionFile: () => "/tmp/omp-late-messages.jsonl",
+      getSessionId: () => "omp-late-messages",
+    },
+  };
+  const reports = () => requests.filter((request: any) => request.method === "agent.conversation.report") as any[];
+  const emit = (name: string, event: unknown) => handlers.get(name)?.(event, context);
+  const user = (timestamp: number) => ({ message: { role: "user", content: "reply", timestamp } });
+  const assistant = (timestamp: number, text: string) => ({
+    message: { role: "assistant", content: [{ type: "text", text }], timestamp },
+  });
+  const oldAnswer = assistant(1_700_000_000_100, "first answer");
+  emit("session_start", { reason: "startup" });
+  emit("agent_start", {});
+  emit("message_start", user(1_700_000_000_000));
+  emit("message_start", oldAnswer);
+  emit("message_end", oldAnswer);
+  emit("agent_end", { isTerminal: true, messages: [] });
+  await waitFor(() => reports().some((r) => r.params.payload.state === "completed" && r.params.payload.type === "turn_state"));
+  const settledCount = reports().length;
+  emit("message_update", oldAnswer);
+  emit("message_start", oldAnswer);
+  emit("message_end", oldAnswer);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(reports()).toHaveLength(settledCount);
+
+  emit("agent_start", {});
+  emit("message_start", user(1_700_000_001_000));
+  emit("message_update", oldAnswer);
+  emit("message_start", oldAnswer);
+  emit("message_end", oldAnswer);
+  const newAnswer = assistant(1_700_000_001_100, "second answer");
+  emit("message_start", newAnswer);
+  emit("message_update", newAnswer);
+  emit("message_end", newAnswer);
+  emit("agent_end", { isTerminal: true, messages: [] });
+  await waitFor(() => reports().filter((r) => r.params.payload.type === "turn_state" && r.params.payload.state === "completed").length === 2);
+  expect(reports().filter((r) => r.params.payload.type === "turn_state").map((r) => [r.params.turn_id, r.params.payload.state])).toEqual([
+    ["turn:1700000000000", "started"], ["turn:1700000000000", "completed"],
+    ["turn:1700000001000", "started"], ["turn:1700000001000", "completed"],
+  ]);
+  expect(reports().filter((r) => r.params.payload.text === "first answer")).toHaveLength(1);
+  expect(reports().filter((r) => r.params.payload.text === "second answer").map((r) => [r.params.turn_id, r.params.payload.phase])).toEqual([
+    ["turn:1700000001000", "commentary"], ["turn:1700000001000", "final"],
+  ]);
+});
+
 test("OMP reports the terminal status metadata used by Chat", async () => {
   const requests = await startRecordingServer("omp-status-metadata");
   const { handlers, pi } = createExtensionHarness();

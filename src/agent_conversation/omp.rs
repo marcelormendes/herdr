@@ -176,6 +176,26 @@ fn omp_result_steps(details: &Value) -> Option<Vec<PlanStep>> {
 mod tests {
     use super::*;
     #[test]
+    fn native_omp_tool_result_exposes_visible_output_without_private_blocks() {
+        let line = serde_json::json!({"type":"message","id":"result","message":{
+            "role":"toolResult","toolCallId":"bash-1","toolName":"bash",
+            "content":[{"type":"text","text":"OMP_TOOL_OK"},
+                {"type":"thinking","thinking":"private"},
+                {"type":"image","data":"private bytes"}],
+            "isError":false
+        }})
+        .to_string();
+        let records = normalize_omp_line(&line, None);
+        assert_eq!(records[0].native_id.as_deref(), Some("bash-1"));
+        assert!(matches!(&records[0].payload,
+            ConversationItemPayload::ToolActivity {
+                detail: Some(detail),
+                status: crate::api::schema::conversations::ToolStatus::Completed,
+                ..
+            } if detail == "OMP_TOOL_OK"));
+    }
+
+    #[test]
     fn omp_adapter_uses_authoritative_todo_list_shape_and_edit_details() {
         let call = serde_json::json!({
             "type": "message",

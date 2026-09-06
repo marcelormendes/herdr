@@ -8,8 +8,8 @@ use serde_json::Value;
 
 use crate::agent_conversation::{
     cap_text, safe_display_path_under_root, tool_command_preview, validate_under_root,
-    NativeRecord, ProviderAdapter, SourceFingerprint, TranscriptError, MAX_ITEMS_PER_PAGE,
-    MAX_MESSAGE_TEXT_BYTES, MAX_TEXT_BYTES,
+    NativeRecord, ProviderAdapter, SourceFingerprint, TranscriptError, MAX_DETAIL_BYTES,
+    MAX_ITEMS_PER_PAGE, MAX_MESSAGE_TEXT_BYTES, MAX_TEXT_BYTES,
 };
 use crate::api::schema::conversations::{
     AssistantMessagePhase, AttachmentMetadata, CompletionState, ConversationItemPayload, PlanStep,
@@ -339,11 +339,43 @@ fn normalize_tool_result(
                 ToolStatus::Completed
             },
             preview: None,
-            detail: None,
+            detail: tool_result_text(message.get("content")),
             duration_ms: None,
             paths: Vec::new(),
         },
     )]
+}
+
+// Keep only provider-visible text blocks; image bytes, private reasoning, and
+// provider-specific details are not tool output. Bound allocation as we append.
+fn tool_result_text(content: Option<&Value>) -> Option<String> {
+    match content? {
+        Value::String(text) => (!text.trim().is_empty()).then(|| cap_text(text, MAX_DETAIL_BYTES)),
+        Value::Array(blocks) => {
+            let mut text = String::new();
+            for block in blocks {
+                if block.get("type").and_then(Value::as_str) != Some("text") {
+                    continue;
+                }
+                let Some(value) = block.get("text").and_then(Value::as_str) else {
+                    continue;
+                };
+                if value.trim().is_empty() {
+                    continue;
+                }
+                if !text.is_empty() && text.len() < MAX_DETAIL_BYTES {
+                    text.push('\n');
+                }
+                let remaining = MAX_DETAIL_BYTES - text.len();
+                text.push_str(&cap_text(value, remaining));
+                if value.len() >= remaining {
+                    break;
+                }
+            }
+            (!text.is_empty()).then_some(text)
+        }
+        _ => None,
+    }
 }
 
 fn text_and_attachments(content: Option<&Value>) -> (String, Vec<AttachmentMetadata>) {
@@ -557,10 +589,53 @@ mod tests {
             ConversationItemPayload::ToolActivity {
                 status: ToolStatus::Completed,
                 preview: None,
-                detail: None,
+                detail: Some(ref detail),
                 ..
-            }
+            } if detail == "done"
         ));
+    }
+
+    #[test]
+    fn tool_results_keep_bounded_visible_output_and_failure_status() {
+        for content in [
+            serde_json::json!("PI_TOOL_OK"),
+            serde_json::json!([
+                {"type":"text","text":"PI_TOOL_OK"},
+                {"type":"thinking","text":"private reasoning"},
+                {"type":"image","data":"private image bytes"}
+            ]),
+        ] {
+            let line = serde_json::json!({"type":"message","id":"result","message":{
+                "role":"toolResult","toolCallId":"call-1","toolName":"bash",
+                "content":content,"isError":true
+            }})
+            .to_string();
+            let records = normalize_pi_line(&line);
+            assert_eq!(records[0].native_id.as_deref(), Some("call-1"));
+            assert!(matches!(&records[0].payload,
+                ConversationItemPayload::ToolActivity {
+                    detail: Some(detail), status: ToolStatus::Failed, ..
+                } if detail == "PI_TOOL_OK"));
+        }
+        let large = "🦀".repeat(MAX_DETAIL_BYTES);
+        let output = tool_result_text(Some(&serde_json::json!([
+            {"type":"text","text":"prefix"},
+            {"type":"text","text":large},
+            {"type":"text","text":"tail"}
+        ])))
+        .unwrap();
+        assert!(output.starts_with("prefix\n"));
+        assert!(output.len() <= MAX_DETAIL_BYTES);
+        assert!(output.len() >= MAX_DETAIL_BYTES - 3);
+        assert!(!output.contains("tail"));
+        for hidden in [
+            serde_json::json!([{"type":"thinking","text":"private"}]),
+            serde_json::json!([{"type":"image","data":"private"}]),
+            serde_json::json!({"output":"not a documented text block"}),
+            serde_json::json!(" "),
+        ] {
+            assert_eq!(tool_result_text(Some(&hidden)), None);
+        }
     }
 
     #[test]

@@ -173,7 +173,15 @@ fn normalize_response_item(value: &Value) -> Vec<NativeRecord> {
                     action: cap_text(name, MAX_TEXT_BYTES),
                     label: cap_text(name, MAX_TEXT_BYTES),
                     status: ToolStatus::Running,
-                    preview: tool_command_preview(name, input),
+                    preview: tool_command_preview(name, input).or_else(|| {
+                        // Custom tools (including Codex's JavaScript `exec` wrapper)
+                        // carry source text directly instead of JSON shell arguments.
+                        (payload.get("type").and_then(Value::as_str) == Some("custom_tool_call"))
+                            .then(|| input.and_then(Value::as_str))
+                            .flatten()
+                            .filter(|text| !text.trim().is_empty())
+                            .map(|text| cap_text(text, MAX_DETAIL_BYTES))
+                    }),
                     detail: None,
                     duration_ms: None,
                     paths: tool_paths(input),
@@ -214,7 +222,7 @@ fn normalize_response_item(value: &Value) -> Vec<NativeRecord> {
                         ToolStatus::Completed
                     },
                     preview: None,
-                    detail: None,
+                    detail: tool_output_text(payload.get("output")),
                     duration_ms: None,
                     paths: Vec::new(),
                 },
@@ -361,6 +369,39 @@ fn normalize_event_msg(value: &Value) -> Vec<NativeRecord> {
     }
 }
 
+/// Rollouts use either a plain output string or typed content blocks. Only
+/// visible text belongs in tool details; never serialize images or reasoning.
+fn tool_output_text(output: Option<&Value>) -> Option<String> {
+    let output = output?;
+    if let Some(text) = output.as_str() {
+        return (!text.trim().is_empty()).then(|| cap_text(text, MAX_DETAIL_BYTES));
+    }
+    let mut text = String::new();
+    for part in output.as_array()? {
+        if !matches!(
+            part.get("type").and_then(Value::as_str),
+            Some("input_text" | "output_text" | "text")
+        ) {
+            continue;
+        }
+        let Some(value) = part.get("text").and_then(Value::as_str) else {
+            continue;
+        };
+        if value.trim().is_empty() {
+            continue;
+        }
+        if !text.is_empty() && text.len() < MAX_DETAIL_BYTES {
+            text.push('\n');
+        }
+        let remaining = MAX_DETAIL_BYTES - text.len();
+        text.push_str(&cap_text(value, remaining));
+        if value.len() >= remaining {
+            break;
+        }
+    }
+    (!text.is_empty()).then_some(text)
+}
+
 fn tool_paths(input: Option<&Value>) -> Vec<String> {
     let Some(input) = input else {
         return Vec::new();
@@ -501,14 +542,77 @@ mod tests {
         );
         assert_eq!(call[0].native_id, output[0].native_id);
         assert!(matches!(
-            output[0].payload,
+            &output[0].payload,
             ConversationItemPayload::ToolActivity {
                 status: ToolStatus::Completed,
                 preview: None,
-                detail: None,
+                detail: Some(detail),
                 ..
-            }
+            } if detail == "ok"
         ));
+    }
+
+    #[test]
+    fn custom_exec_keeps_source_and_typed_output_after_pairing() {
+        let call = normalize_codex_line(
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"exec-1","name":"exec","input":"text(await tools.exec_command({cmd:\"printf TOOL_OK\"}));"}}"#,
+        );
+        let output = normalize_codex_line(
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"exec-1","output":[{"type":"input_text","text":"Script completed"},{"type":"input_text","text":"{\"exit_code\":0,\"output\":\"TOOL_OK\"}"},{"type":"reasoning","text":"private reasoning"},{"type":"input_image","text":"private image","image_url":"data:image/png;base64,hidden"}]}}"#,
+        );
+        assert_eq!(call[0].native_id, output[0].native_id);
+        let merged = crate::agent_conversation::merge_payload(&call[0].payload, &output[0].payload);
+        assert!(matches!(
+            merged,
+            ConversationItemPayload::ToolActivity {
+                ref action,
+                status: ToolStatus::Completed,
+                preview: Some(ref preview),
+                detail: Some(ref detail),
+                ..
+            } if action == "exec"
+                && preview == "text(await tools.exec_command({cmd:\"printf TOOL_OK\"}));"
+                && detail == "Script completed\n{\"exit_code\":0,\"output\":\"TOOL_OK\"}"
+        ));
+    }
+
+    #[test]
+    fn custom_tool_payloads_are_bounded_and_nontext_outputs_stay_absent() {
+        let large = "🦀".repeat(MAX_DETAIL_BYTES);
+        let call = normalize_codex_line(
+            &serde_json::json!({
+                "type": "response_item",
+                "payload": {"type": "custom_tool_call", "name": "exec", "input": large}
+            })
+            .to_string(),
+        );
+        assert!(matches!(
+            &call[0].payload,
+            ConversationItemPayload::ToolActivity { preview: Some(preview), .. }
+                if preview.len() == MAX_DETAIL_BYTES
+        ));
+        for output in [
+            serde_json::json!(large),
+            serde_json::json!([
+                {"type": "input_text", "text": "x"},
+                {"type": "output_text", "text": large}
+            ]),
+        ] {
+            let detail = tool_output_text(Some(&output)).unwrap();
+            assert!(detail.len() <= MAX_DETAIL_BYTES);
+            assert!(detail.len() >= MAX_DETAIL_BYTES - 3);
+        }
+        for output in [
+            Value::Null,
+            serde_json::json!(" "),
+            serde_json::json!([
+                {"type": "reasoning", "text": "private"},
+                {"type": "input_image", "image_url": "private"},
+                {"type": "input_text", "text": 12}
+            ]),
+        ] {
+            assert_eq!(tool_output_text(Some(&output)), None);
+        }
     }
 
     #[test]

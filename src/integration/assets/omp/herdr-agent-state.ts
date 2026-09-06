@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=omp
-// HERDR_INTEGRATION_VERSION=17
+// HERDR_INTEGRATION_VERSION=18
 // @ts-nocheck
 
 import { execFile } from "node:child_process";
@@ -763,11 +763,28 @@ export default function (pi) {
     idleTimer.unref?.();
   }
 
+  function isStaleAssistantMessage(message: any): boolean {
+    if (message?.role !== "assistant") {
+      return false;
+    }
+    // OMP queues streaming callbacks separately from terminal agent_end.
+    // Late delivery must not create another turn or attach old output to the
+    // next user turn. The durable transcript retains settled messages.
+    return !agentActive || (
+      activeTurnStartedMs !== undefined &&
+      typeof message.timestamp === "number" &&
+      message.timestamp < activeTurnStartedMs
+    );
+  }
+
   function reportMessage(event: any, phase: "commentary" | "final") {
     if (!rootSession) {
       return;
     }
     const message = event?.message ?? event;
+    if (isStaleAssistantMessage(message)) {
+      return;
+    }
     if (message?.role !== "user" && message?.role !== "assistant") {
       return;
     }
@@ -860,6 +877,9 @@ export default function (pi) {
 
   pi.on("message_start", (event) => {
     const message = event?.message ?? event;
+    if (isStaleAssistantMessage(message)) {
+      return;
+    }
     if (message?.role === "user") {
       const startedMs =
         typeof message?.timestamp === "number" && Number.isSafeInteger(message.timestamp)
