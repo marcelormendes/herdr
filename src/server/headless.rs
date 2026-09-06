@@ -369,6 +369,11 @@ fn apply_terminal_attach_scroll(
         return apply_terminal_attach_input(runtime, input);
     }
 
+    // Wheel requests coalesce multiple lines. Repeat the encoded event in one
+    // queue entry so mouse/alternate-screen applications receive the full count
+    // without partially accepting a batch when the input queue is full. The u16
+    // wire count and fixed-size event encodings bound this allocation.
+    let repeats = usize::from(lines.max(1));
     match runtime.wheel_routing() {
         Some(crate::pane::WheelRouting::MouseReport) => {
             runtime.scroll_reset();
@@ -386,7 +391,7 @@ fn apply_terminal_attach_scroll(
                 ));
             };
             runtime
-                .try_send_bytes(Bytes::from(bytes))
+                .try_send_bytes(Bytes::from(bytes.repeat(repeats)))
                 .map_err(|err| format!("terminal attach mouse wheel input failed: {err}"))?;
         }
         Some(crate::pane::WheelRouting::AlternateScroll) => {
@@ -395,7 +400,7 @@ fn apply_terminal_attach_scroll(
                 return Ok(());
             };
             runtime
-                .try_send_bytes(Bytes::from(bytes))
+                .try_send_bytes(Bytes::from(bytes.repeat(repeats)))
                 .map_err(|err| format!("terminal attach alternate scroll input failed: {err}"))?;
         }
         Some(crate::pane::WheelRouting::HostScroll) | None => match direction {
@@ -7281,6 +7286,92 @@ next_tab = ""
             0,
         )
         .expect("page key");
+    }
+
+    #[test]
+    fn terminal_attach_scroll_repeats_mouse_reports_in_one_input_message() {
+        with_terminal_attach_page_key_runtime(b"\x1b[?1000h\x1b[?1006h", 3, |runtime, input_rx| {
+            for (direction, lines, expected) in [
+                (
+                    AttachScrollDirection::Up,
+                    3,
+                    b"\x1b[<68;5;3M\x1b[<68;5;3M\x1b[<68;5;3M".as_slice(),
+                ),
+                (
+                    AttachScrollDirection::Down,
+                    2,
+                    b"\x1b[<69;5;3M\x1b[<69;5;3M".as_slice(),
+                ),
+                (AttachScrollDirection::Up, 0, b"\x1b[<68;5;3M".as_slice()),
+            ] {
+                apply_terminal_attach_scroll(
+                    runtime,
+                    AttachScrollSource::Wheel,
+                    direction,
+                    lines,
+                    Some(4),
+                    Some(2),
+                    KeyModifiers::SHIFT.bits(),
+                )
+                .expect("mouse wheel");
+                assert_eq!(input_rx.try_recv().expect("wheel batch").as_ref(), expected);
+                assert!(input_rx.try_recv().is_err(), "one atomic input per request");
+                assert_eq!(runtime.scroll_metrics().unwrap().offset_from_bottom, 0);
+            }
+        });
+    }
+
+    #[test]
+    fn terminal_attach_scroll_repeats_alternate_screen_keys_in_one_input_message() {
+        with_terminal_attach_page_key_runtime(
+            b"\x1b[?1049h\x1b[?1007h\x1b[?1h",
+            0,
+            |runtime, input_rx| {
+                for (direction, lines, expected) in [
+                    (
+                        AttachScrollDirection::Up,
+                        3,
+                        b"\x1bOA\x1bOA\x1bOA".as_slice(),
+                    ),
+                    (AttachScrollDirection::Down, 2, b"\x1bOB\x1bOB".as_slice()),
+                    (AttachScrollDirection::Down, 0, b"\x1bOB".as_slice()),
+                ] {
+                    apply_terminal_attach_scroll(
+                        runtime,
+                        AttachScrollSource::Wheel,
+                        direction,
+                        lines,
+                        None,
+                        None,
+                        0,
+                    )
+                    .expect("alternate wheel");
+                    assert_eq!(input_rx.try_recv().expect("wheel batch").as_ref(), expected);
+                    assert!(input_rx.try_recv().is_err(), "one atomic input per request");
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn terminal_attach_scroll_preserves_maximum_wire_count_without_filling_input_queue() {
+        with_terminal_attach_page_key_runtime(b"\x1b[?1000h\x1b[?1006h", 0, |runtime, input_rx| {
+            apply_terminal_attach_scroll(
+                runtime,
+                AttachScrollSource::Wheel,
+                AttachScrollDirection::Down,
+                u16::MAX,
+                None,
+                None,
+                0,
+            )
+            .expect("maximum wheel count fits one queue entry");
+            let bytes = input_rx.try_recv().expect("wheel batch");
+            let event = b"\x1b[<65;1;1M";
+            assert_eq!(bytes.len(), event.len() * usize::from(u16::MAX));
+            assert!(bytes.chunks_exact(event.len()).all(|chunk| chunk == event));
+            assert!(input_rx.try_recv().is_err());
+        });
     }
 
     #[test]
