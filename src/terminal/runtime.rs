@@ -291,6 +291,13 @@ impl TerminalRuntime {
         self.0.search_text_matches(query, case_sensitive)
     }
 
+    pub(crate) fn reveal_text_match(
+        &self,
+        text_match: crate::pane::TerminalTextMatch,
+    ) -> Option<String> {
+        self.0.reveal_text_match(text_match)
+    }
+
     pub(crate) fn text_match_is_current(&self, text_match: crate::pane::TerminalTextMatch) -> bool {
         self.0.text_match_is_current(text_match)
     }

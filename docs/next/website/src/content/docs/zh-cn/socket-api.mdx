@@ -642,6 +642,20 @@ Worktree 事件订阅包括 `worktree.created`、`worktree.opened` 和 `worktree
 
 生命周期事件用 `events.subscribe`。支持一次性等待时,专门的等待辅助命令会单独在文档中说明。
 
+## 搜索保留的终端历史
+
+`pane.search` 搜索当前终端保留的全部文本，包括超过 `pane.read` 行数限制的旧历史，并将原生视口移动到选中的匹配位置。它使用支持 Unicode 的字面文本匹配，可跨越软换行；显式换行仍分隔文本行。如果应用正在使用备用屏幕，则搜索该屏幕。
+
+```json
+{"id":"search-1","method":"pane.search","params":{"pane_id":"w1:p1","terminal_id":"TERMINAL_ID_FROM_PANE_GET","query":"needle","case_sensitive":false,"direction":"first"}}
+```
+
+必填的 `terminal_id` 用于防止窗格重新连接到其他终端；不匹配时返回 `terminal_mismatch`。查询最多为 4096 个 UTF-8 字节。`case_sensitive` 默认为 `false`。使用 `first` 选择最早的匹配，或将返回的不透明 `cursor` 与 `next` / `previous` 一起使用，在匹配项之间循环导航。
+
+无效或过期的游标会重新开始导航（`next` 从最早的匹配开始，`previous` 从最新的匹配开始）；超过 16384 字节的游标返回 `invalid_params`。更改查询、大小写选项或终端会使游标失效。游标绑定当前文本和坐标，而非历史中某次出现的永久身份：历史被淘汰后，相同文本出现在相同坐标时可能无法区分。每个请求都会重新搜索当前保留的缓冲区。
+
+响应为 `{"type":"pane_search","search":{...}}`，包含 `pane_id`、`terminal_id`、`query`、`case_sensitive`、`match_count`、从零开始的 `match_index`、`cursor` 和 `preview`。预览包含选中行的上下文，最多为 16384 个 UTF-8 字节。没有匹配时，索引、游标和预览均为 `null`，视口保持不变。空查询也返回此空结果，不移动视口。如果并发输出在导航前替换了选中的匹配文本，则返回 `search_changed`；请重试请求。验证和视口导航相对于终端写入是原子操作。
+
 ## 读取窗格
 
 除非你在编写协议客户端,否则通过 CLI 使用 `pane.read`。

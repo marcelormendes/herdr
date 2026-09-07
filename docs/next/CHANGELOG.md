@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Public `pane.search` searches all retained terminal history and navigates the native viewport with Unicode-aware matching and next/previous wraparound.
+
 ## [0.8.7] - 2026-09-05
 
 ### Changed

@@ -191,6 +191,8 @@ pub enum Method {
     PaneSendInput(PaneSendInputParams),
     #[serde(rename = "pane.read")]
     PaneRead(PaneReadParams),
+    #[serde(rename = "pane.search")]
+    PaneSearch(PaneSearchParams),
     #[serde(rename = "pane.graphics.set")]
     PaneGraphicsSet(PaneGraphicsSetParams),
     #[serde(rename = "pane.graphics.clear")]

@@ -103,7 +103,7 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.search`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
@@ -828,6 +828,38 @@ updated `PaneLayoutSnapshot` for one tab. Clients that bootstrap with
 Worktree event subscriptions include `worktree.created`, `worktree.opened`, and `worktree.removed`. Worktree events describe Git checkout lifecycle. `worktree.created` includes the opened `workspace` and created `worktree`. `worktree.opened` includes the target `workspace`, opened `worktree`, and `already_open`. `worktree.removed` includes the `workspace_id`, removed `worktree`, and `forced`.
 
 Use `events.subscribe` for lifecycle events. Dedicated wait helpers are documented separately when a one-shot wait is supported.
+
+## Searching retained terminal history
+
+`pane.search` searches all text retained by the pane's current terminal, including
+history older than the `pane.read` row limit, and moves the native viewport to
+the selected match. It uses literal, Unicode-aware text matching across soft
+wraps; hard line breaks remain separate. The active alternate screen is searched
+when an application has switched to it.
+
+```json
+{"id":"search-1","method":"pane.search","params":{"pane_id":"w1:p1","terminal_id":"TERMINAL_ID_FROM_PANE_GET","query":"needle","case_sensitive":false,"direction":"first"}}
+```
+
+The required `terminal_id` guards against pane reattachment; a mismatch returns
+`terminal_mismatch`. Queries are limited to 4096 UTF-8 bytes. `case_sensitive`
+defaults to `false`. Use `first` for the oldest match, or `next` / `previous`
+with the returned opaque `cursor` to navigate and wrap through matches.
+Invalid or stale cursors restart navigation (`next` starts at the oldest match,
+`previous` at the newest); oversized cursors above 16384 bytes return
+`invalid_params`. Changing the query, case sensitivity, or terminal invalidates
+the cursor. Cursors anchor current text and coordinates rather than a permanent
+historical occurrence: identical repeated text after history eviction can be
+indistinguishable. Every request searches the current retained buffer again.
+
+The response is `{"type":"pane_search","search":{...}}`, with `pane_id`,
+`terminal_id`, `query`, `case_sensitive`, `match_count`, zero-based `match_index`,
+`cursor`, and `preview`. The preview contains selected-row context, bounded to
+16384 UTF-8 bytes. When there are no matches, the index, cursor, and preview are
+all `null`, and the viewport stays unchanged. An empty query also returns this
+empty result without moving the viewport. Concurrent output that replaces a
+selected match before navigation returns `search_changed`; retry the request.
+Search navigation and validation are atomic relative to terminal writes.
 
 ## Reading panes
 

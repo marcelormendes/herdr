@@ -3719,6 +3719,52 @@
           ],
           "type": "string"
         },
+        "PaneSearchDirection": {
+          "enum": [
+            "first",
+            "next",
+            "previous"
+          ],
+          "type": "string"
+        },
+        "PaneSearchParams": {
+          "description": "Search all retained text in the pane's currently attached terminal.",
+          "properties": {
+            "case_sensitive": {
+              "default": false,
+              "type": "boolean"
+            },
+            "cursor": {
+              "default": null,
+              "description": "Opaque cursor returned by the preceding search; at most 16384 bytes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "direction": {
+              "$ref": "#/schemas/request/$defs/PaneSearchDirection"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "query": {
+              "description": "Literal query, at most 4096 UTF-8 bytes. Empty queries do not move the viewport.",
+              "type": "string"
+            },
+            "terminal_id": {
+              "description": "Required identity guard against a pane being attached to a different terminal.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "terminal_id",
+            "query",
+            "direction"
+          ],
+          "type": "object"
+        },
         "PaneSendInputParams": {
           "properties": {
             "keys": {
@@ -6352,6 +6398,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneReadParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.search",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneSearchParams"
             }
           },
           "required": [
@@ -9533,6 +9595,57 @@
           ],
           "type": "object"
         },
+        "PaneSearchResult": {
+          "properties": {
+            "case_sensitive": {
+              "type": "boolean"
+            },
+            "cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "match_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "match_index": {
+              "description": "Zero-based index in retained-history order.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "preview": {
+              "description": "Visible context from the selected match's rows, bounded to 16384 UTF-8 bytes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "query": {
+              "type": "string"
+            },
+            "terminal_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "terminal_id",
+            "query",
+            "case_sensitive",
+            "match_count"
+          ],
+          "type": "object"
+        },
         "PaneSwapReason": {
           "enum": [
             "no_neighbor",
@@ -10954,6 +11067,22 @@
               "required": [
                 "type",
                 "resize"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "search": {
+                  "$ref": "#/schemas/success_response/$defs/PaneSearchResult"
+                },
+                "type": {
+                  "const": "pane_search",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "search"
               ],
               "type": "object"
             },

@@ -286,6 +286,44 @@ pub struct PaneReadParams {
     pub(crate) intent: super::common::ReadIntent,
 }
 
+/// Search all retained text in the pane's currently attached terminal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneSearchParams {
+    pub pane_id: String,
+    /// Required identity guard against a pane being attached to a different terminal.
+    pub terminal_id: String,
+    /// Literal query, at most 4096 UTF-8 bytes. Empty queries do not move the viewport.
+    pub query: String,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    pub direction: PaneSearchDirection,
+    /// Opaque cursor returned by the preceding search; at most 16384 bytes.
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneSearchDirection {
+    First,
+    Next,
+    Previous,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneSearchResult {
+    pub pane_id: String,
+    pub terminal_id: String,
+    pub query: String,
+    pub case_sensitive: bool,
+    pub match_count: usize,
+    /// Zero-based index in retained-history order.
+    pub match_index: Option<usize>,
+    pub cursor: Option<String>,
+    /// Visible context from the selected match's rows, bounded to 16384 UTF-8 bytes.
+    pub preview: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PaneGraphicsFormat {

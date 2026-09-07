@@ -252,6 +252,44 @@ impl PaneTerminal {
         buffer.search(query, case_sensitive, active_screen)
     }
 
+    /// Validate the selected text and move the viewport under one terminal lock.
+    /// This keeps PTY writes from replacing the match between validation and scroll.
+    pub(crate) fn reveal_text_match(&self, text_match: TerminalTextMatch) -> Option<String> {
+        let mut core = self.ghostty.core.lock().ok()?;
+        let cols = core.terminal.cols().ok()?;
+        if cols != text_match.scan_cols
+            || core.terminal.active_screen().ok()? != text_match.scan_screen
+        {
+            return None;
+        }
+        let rows = core
+            .terminal
+            .screen_text_rows_range(
+                text_match.start.row as usize,
+                text_match.end.row.saturating_add(1) as usize,
+            )
+            .ok()?;
+        let buffer = RetainedTextBuffer::new_search(cols, rows, text_match.start.row);
+        if !buffer.contains_match(text_match) {
+            return None;
+        }
+        let scrollbar = core.terminal.scrollbar().ok()?;
+        let top = (text_match.start.row as usize).saturating_sub(scrollbar.len / 2);
+        core.terminal.scroll_viewport_row(top);
+        // Only the selected physical rows are read, and the response is bounded.
+        let context = buffer
+            .lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut end = context.len().min(16384);
+        while !context.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        Some(context[..end].to_owned())
+    }
+
     pub(crate) fn text_match_is_current(&self, text_match: TerminalTextMatch) -> bool {
         self.text_matches_are_current(&[text_match])
             .first()

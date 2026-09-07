@@ -8,6 +8,7 @@ mod env;
 mod integrations;
 mod layouts;
 mod pane_graphics;
+mod pane_search;
 mod panes;
 pub(crate) mod plugins;
 mod responses;
@@ -1303,6 +1304,7 @@ impl App {
             Method::PaneInputSet(params) => return self.handle_pane_input_set(request.id, params),
             Method::PaneRename(params) => return self.handle_pane_rename(request.id, params),
             Method::PaneRead(params) => return self.handle_pane_read(request.id, params),
+            Method::PaneSearch(params) => return self.handle_pane_search(request.id, params),
             Method::PaneGraphicsSet(params) => {
                 return self.handle_pane_graphics_set(request.id, params);
             }
