@@ -2,8 +2,14 @@
 
 ## Unreleased
 
+## [0.8.8] - 2026-09-06
+
 ### Added
 - Public `pane.search` searches all retained terminal history and navigates the native viewport with Unicode-aware matching and next/previous wraparound.
+
+### Fixed
+- Structured Chat preserves Codex and Pi tool output payloads and waits for the final OMP assistant reply before marking a turn complete.
+- Full-screen terminal applications receive the complete number of coalesced mouse-wheel events.
 
 ## [0.8.7] - 2026-09-05
 

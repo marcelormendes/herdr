@@ -5,6 +5,8 @@ description: "Control Herdr, a terminal multiplexer for coding agents. Use only 
 
 # Herdr
 
+Reviewed for stable Herdr 0.8.8.
+
 Herdr organizes terminals into workspaces, tabs, and panes, recognizes coding agents running inside panes, and exposes the current session through the `herdr` CLI.
 
 Before issuing any control command, verify that this agent is running inside a Herdr-managed pane:
@@ -181,6 +183,8 @@ Use the read source that matches the task:
 Use `--format ansi` when colors and terminal styling are evidence. Otherwise use text.
 
 `--lines` asks Herdr for more rows from the pane's available screen and host scrollback. If increasing it does not reveal more of a completed response, the pane is probably running the agent on the terminal's alternate screen. Rows that leave the alternate screen do not enter Herdr's host scrollback, so a larger line count cannot recover them.
+
+For API clients, `pane.search` searches all retained host history without the `pane.read` row limit. It takes `pane_id`, the current `terminal_id` from `pane.get`, a literal `query`, and `direction` (`first`, `next`, or `previous`). Use the returned opaque cursor to continue navigation. Search handles Unicode and soft wrapping, and moves the native viewport to the matching text, so use it only when changing that pane's view is intended. It cannot recover output already discarded from terminal history or from an inactive alternate screen. `herdr api schema --json` describes the request and response; there is no corresponding `pane search` CLI command.
 
 After that failed read, ask the agent to write its complete response as Markdown in a temporary directory and reply only with the file path, then read the file directly. Use this only as a fallback; do not request file output in the initial prompt.
 
