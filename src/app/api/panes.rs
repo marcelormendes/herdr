@@ -4515,6 +4515,11 @@ mod tests {
 
     #[test]
     fn live_conversation_report_requires_the_pane_integration_token_and_session() {
+        let session_path = std::env::current_dir()
+            .unwrap()
+            .join("pi-live.jsonl")
+            .to_string_lossy()
+            .into_owned();
         let (mut app, pane_id) = app_with_test_workspace();
         let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
         let terminal_id = app.state.workspaces[0]
@@ -4533,7 +4538,7 @@ mod tests {
                 agent: "pi".into(),
                 seq: Some(1),
                 agent_session_id: None,
-                agent_session_path: Some("/tmp/pi-live.jsonl".into()),
+                agent_session_path: Some(session_path.clone()),
                 session_start_source: Some("startup".into()),
                 integration_token: Some("tok-live".into()),
             },
@@ -4553,7 +4558,7 @@ mod tests {
                     integration_token: token.into(),
                     seq,
                     agent_session_id: None,
-                    agent_session_path: Some("/tmp/pi-live.jsonl".into()),
+                    agent_session_path: Some(session_path.clone()),
                     native_id: Some(native_id.into()),
                     entry_id: None,
                     turn_id: Some("turn-1".into()),
@@ -4601,6 +4606,11 @@ mod tests {
 
     #[test]
     fn agent_session_report_requires_the_pane_integration_token() {
+        let session_path = std::env::current_dir()
+            .unwrap()
+            .join("pi-session.jsonl")
+            .to_string_lossy()
+            .into_owned();
         let (mut app, pane_id) = app_with_test_workspace();
         let internal_pane_id = app.parse_pane_id(&pane_id).unwrap().1;
         let terminal_id = app.state.workspaces[0]
@@ -4619,7 +4629,7 @@ mod tests {
             agent: "pi".into(),
             seq: Some(1),
             agent_session_id: None,
-            agent_session_path: Some("/tmp/pi-session.jsonl".into()),
+            agent_session_path: Some(session_path.clone()),
             session_start_source: None,
             integration_token: None,
         };
@@ -4633,7 +4643,7 @@ mod tests {
             agent: "pi".into(),
             seq: Some(1),
             agent_session_id: None,
-            agent_session_path: Some("/tmp/pi-session.jsonl".into()),
+            agent_session_path: Some(session_path.clone()),
             session_start_source: None,
             integration_token: Some("tok-other".into()),
         };
@@ -4647,7 +4657,7 @@ mod tests {
             agent: "pi".into(),
             seq: Some(2),
             agent_session_id: None,
-            agent_session_path: Some("/tmp/pi-session.jsonl".into()),
+            agent_session_path: Some(session_path.clone()),
             session_start_source: Some("startup".into()),
             integration_token: Some("tok-1".into()),
         };
