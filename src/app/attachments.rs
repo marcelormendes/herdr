@@ -316,7 +316,10 @@ impl AttachmentStore {
     }
 
     pub(crate) fn cleanup_expired(&mut self) {
-        let now = Instant::now();
+        self.cleanup_expired_at(Instant::now());
+    }
+
+    fn cleanup_expired_at(&mut self, now: Instant) {
         let expired_uploads: Vec<String> = self
             .uploads
             .iter()
@@ -791,12 +794,13 @@ mod tests {
             )
             .unwrap()
             .0;
-        store
-            .uploads
-            .get_mut(&expired_upload.handle)
-            .unwrap()
-            .created_at = Instant::now() - ATTACHMENT_TTL;
         let expired_path = store.uploads[&expired_upload.handle].path.clone();
+        // Fresh Windows runners may have less uptime than the TTL. Advance
+        // cleanup time instead of constructing an instant before clock zero.
+        let expires_at = store.uploads[&expired_upload.handle].created_at + ATTACHMENT_TTL;
+        store.cleanup_expired_at(expires_at);
+        assert!(!expired_path.exists());
+        assert!(!store.uploads.contains_key(&expired_upload.handle));
 
         let completed_upload = store
             .begin(
@@ -816,10 +820,6 @@ mod tests {
         let completed = store.finish(completed_upload).unwrap();
         let completed_path = store.attachments[&completed.handle].path.clone();
         store.take_for_prompt(&completed).unwrap();
-
-        store.cleanup_expired();
-        assert!(!expired_path.exists());
-        assert!(!store.uploads.contains_key(&expired_upload.handle));
 
         store.remove_for_pane_session(PaneId::from_raw(7), "session-old");
         assert!(!completed_path.exists());

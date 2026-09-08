@@ -1,4 +1,6 @@
-mod support;
+#![cfg(unix)]
+
+pub mod support;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -12,9 +14,33 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use support::{
-    cleanup_test_base, client_handshake, register_runtime_dir, register_spawned_herdr_pid,
-    send_input, unregister_spawned_herdr_pid, wait_for_disconnect, wait_for_socket,
+    cleanup_test_base, client_shell_handshake, register_runtime_dir, register_spawned_herdr_pid,
+    send_client_shell_shift_enter, unregister_spawned_herdr_pid, wait_for_client_shell_bootstrap,
+    wait_for_message_variant, wait_for_socket, SERVER_MESSAGE_ENDPOINT_CONTROL,
+    SERVER_MESSAGE_SERVER_SHUTDOWN,
 };
+
+#[test]
+fn wait_for_shutdown_reads_buffered_message_after_peer_closes() {
+    let (mut reader, mut writer) = UnixStream::pair().unwrap();
+    // A one-byte bincode ServerShutdown variant inside the length-prefixed frame.
+    let shutdown = [1, 0, 0, 0, SERVER_MESSAGE_SERVER_SHUTDOWN as u8];
+    writer.write_all(&shutdown).unwrap();
+    assert!(wait_for_message_variant(
+        &mut reader,
+        Duration::from_secs(1),
+        SERVER_MESSAGE_SERVER_SHUTDOWN,
+    )
+    .unwrap());
+    writer.write_all(&shutdown).unwrap();
+    drop(writer);
+    assert!(wait_for_message_variant(
+        &mut reader,
+        Duration::from_secs(1),
+        SERVER_MESSAGE_SERVER_SHUTDOWN,
+    )
+    .unwrap());
+}
 
 struct SpawnedHerdr {
     _master: Box<dyn MasterPty + Send>,
@@ -611,6 +637,96 @@ fn live_server_holds_one_pty_master_fd_per_pane() {
     cleanup_test_base(&base);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn live_handoff_unknown_pane_exit_preserves_session_on_shutdown() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("root pane id")
+        .to_string();
+    let old_pid = spawned.child.process_id().expect("old server pid");
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    let replacement_pid =
+        wait_for_replacement_server_pid(&runtime_dir, old_pid, Duration::from_secs(10));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    let process_info = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:process-info",
+            "method": "pane.process_info",
+            "params": {"pane_id": pane_id}
+        }),
+    );
+    let shell_pid = process_info["result"]["process_info"]["shell_pid"]
+        .as_u64()
+        .expect("shell pid") as libc::pid_t;
+    assert_eq!(unsafe { libc::kill(shell_pid, libc::SIGHUP) }, 0);
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let panes = request(
+            &api_socket,
+            serde_json::json!({"id":"test:panes","method":"pane.list","params":{}}),
+        );
+        if panes["result"]["panes"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "handoff pane was not removed");
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Path::new(&format!("/proc/{replacement_pid}")).exists() {
+        assert!(Instant::now() < deadline, "replacement server did not stop");
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let session: serde_json::Value = serde_json::from_slice(
+        &fs::read(config_home.join("herdr-dev/session.json")).expect("saved session"),
+    )
+    .expect("valid session json");
+    assert_eq!(session["workspaces"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        session["workspaces"][0]["tabs"][0]["panes"]
+            .as_object()
+            .map(serde_json::Map::len),
+        Some(1)
+    );
+
+    cleanup_test_base(&base);
+}
+
 #[test]
 fn live_handoff_preserves_named_session_socket_paths() {
     let _lock = test_lock();
@@ -864,16 +980,21 @@ fn live_handoff_preserves_pane_process_io() {
     assert_eq!(unsafe { libc::kill(child_pid as libc::pid_t, 0) }, 0);
     assert_eq!(unsafe { libc::kill(second_child_pid as libc::pid_t, 0) }, 0);
 
-    let protocol = request(
-        &api_socket,
-        serde_json::json!({"id":"test:protocol","method":"ping","params":{}}),
-    )["result"]["protocol"]
-        .as_u64()
-        .unwrap() as u32;
+    let endpoint_generation = support::CURRENT_ENDPOINT_PROTOCOL_GENERATION;
     let mut client_stream = UnixStream::connect(&client_socket).unwrap();
-    let (server_protocol, error) = client_handshake(&mut client_stream, protocol, 80, 24).unwrap();
-    assert_eq!(server_protocol, protocol);
-    assert!(error.is_none(), "client handshake failed: {error:?}");
+    let (server_generation, error) =
+        client_shell_handshake(&mut client_stream, endpoint_generation, 54, 23).unwrap();
+    assert_eq!(server_generation, endpoint_generation);
+    assert!(error.is_none(), "client shell handshake failed: {error:?}");
+    assert!(
+        wait_for_message_variant(
+            &mut client_stream,
+            Duration::from_secs(5),
+            SERVER_MESSAGE_ENDPOINT_CONTROL,
+        )
+        .unwrap(),
+        "client shell should receive a complete snapshot before handoff"
+    );
 
     assert_ok(request(
         &api_socket,
@@ -889,11 +1010,17 @@ fn live_handoff_preserves_pane_process_io() {
         &api_socket,
         serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
     ));
-    drop(spawned);
     assert!(
-        wait_for_disconnect(&mut client_stream, Duration::from_secs(5)).unwrap(),
-        "connected clients should disconnect during live handoff"
+        wait_for_message_variant(
+            &mut client_stream,
+            Duration::from_secs(5),
+            SERVER_MESSAGE_SERVER_SHUTDOWN,
+        )
+        .unwrap(),
+        "connected client shell should receive live-handoff shutdown"
     );
+    // Drop kills the old process; let its shutdown writer flush first.
+    drop(spawned);
     thread::sleep(Duration::from_millis(300));
     wait_for_api(&api_socket, Duration::from_secs(10));
     wait_for_socket(&client_socket, Duration::from_secs(5));
@@ -937,6 +1064,22 @@ fn live_handoff_preserves_pane_process_io() {
         Duration::from_secs(5),
     );
     wait_for_output(&api_socket, &second_pane_id, "second:after-handoff-sec");
+
+    let mut reattached_shell = UnixStream::connect(&client_socket).unwrap();
+    let (server_generation, error) = client_shell_handshake(
+        &mut reattached_shell,
+        support::CURRENT_ENDPOINT_PROTOCOL_GENERATION,
+        54,
+        23,
+    )
+    .unwrap();
+    assert_eq!(
+        server_generation,
+        support::CURRENT_ENDPOINT_PROTOCOL_GENERATION
+    );
+    assert!(error.is_none(), "reattached client shell failed: {error:?}");
+    wait_for_client_shell_bootstrap(&mut reattached_shell, Duration::from_secs(5))
+        .expect("fresh client shell should receive restored snapshot before pane content");
 
     let _ = request(
         &api_socket,
@@ -1008,12 +1151,6 @@ pathlib.Path({received:?}).write_text(data.hex())
     ));
     support::wait_for_file(&ready_marker, Duration::from_secs(5));
 
-    let protocol = request(
-        &api_socket,
-        serde_json::json!({"id":"test:protocol","method":"ping","params":{}}),
-    )["result"]["protocol"]
-        .as_u64()
-        .unwrap() as u32;
     assert_ok(request(
         &api_socket,
         serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
@@ -1023,10 +1160,21 @@ pathlib.Path({received:?}).write_text(data.hex())
     wait_for_socket(&client_socket, Duration::from_secs(5));
 
     let mut client_stream = UnixStream::connect(&client_socket).unwrap();
-    let (server_protocol, error) = client_handshake(&mut client_stream, protocol, 80, 24).unwrap();
-    assert_eq!(server_protocol, protocol);
-    assert!(error.is_none(), "client handshake failed: {error:?}");
-    send_input(&mut client_stream, b"\x1b[13;2u").unwrap();
+    let (server_generation, error) = client_shell_handshake(
+        &mut client_stream,
+        support::CURRENT_ENDPOINT_PROTOCOL_GENERATION,
+        54,
+        23,
+    )
+    .unwrap();
+    assert_eq!(
+        server_generation,
+        support::CURRENT_ENDPOINT_PROTOCOL_GENERATION
+    );
+    assert!(error.is_none(), "client shell handshake failed: {error:?}");
+    wait_for_client_shell_bootstrap(&mut client_stream, Duration::from_secs(5))
+        .expect("client shell should receive restored state before sending input");
+    send_client_shell_shift_enter(&mut client_stream, &pane_id).unwrap();
 
     wait_for_file_contains(&received_marker, "1b5b31333b3275", Duration::from_secs(5));
 
@@ -1099,12 +1247,6 @@ pathlib.Path({received:?}).write_text(data.hex())
     ));
     support::wait_for_file(&ready_marker, Duration::from_secs(5));
 
-    let protocol = request(
-        &api_socket,
-        serde_json::json!({"id":"test:protocol","method":"ping","params":{}}),
-    )["result"]["protocol"]
-        .as_u64()
-        .unwrap() as u32;
     assert_ok(request(
         &api_socket,
         serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
@@ -1114,10 +1256,21 @@ pathlib.Path({received:?}).write_text(data.hex())
     wait_for_socket(&client_socket, Duration::from_secs(5));
 
     let mut client_stream = UnixStream::connect(&client_socket).unwrap();
-    let (server_protocol, error) = client_handshake(&mut client_stream, protocol, 80, 24).unwrap();
-    assert_eq!(server_protocol, protocol);
-    assert!(error.is_none(), "client handshake failed: {error:?}");
-    send_input(&mut client_stream, b"\x1b[13;2u").unwrap();
+    let (server_generation, error) = client_shell_handshake(
+        &mut client_stream,
+        support::CURRENT_ENDPOINT_PROTOCOL_GENERATION,
+        54,
+        23,
+    )
+    .unwrap();
+    assert_eq!(
+        server_generation,
+        support::CURRENT_ENDPOINT_PROTOCOL_GENERATION
+    );
+    assert!(error.is_none(), "client shell handshake failed: {error:?}");
+    wait_for_client_shell_bootstrap(&mut client_stream, Duration::from_secs(5))
+        .expect("client shell should receive restored state before sending input");
+    send_client_shell_shift_enter(&mut client_stream, &pane_id).unwrap();
 
     wait_for_file_contains(
         &received_marker,

@@ -12,6 +12,25 @@ use super::responses::{encode_error, encode_error_body, encode_success};
 
 const AGENT_PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
 
+struct QueuedAgentPrompt {
+    id: String,
+    agent: crate::api::schema::AgentInfo,
+    completion: std::sync::mpsc::Receiver<std::io::Result<()>>,
+    attachments: Vec<crate::app::attachments::StagedAttachment>,
+}
+
+fn agent_prompt_submit_delay(agent: crate::detect::Agent, prompt_bytes: usize) -> Duration {
+    #[cfg(windows)]
+    if agent == crate::detect::Agent::Codex {
+        // Codex consumes Windows paste bursts at about 4 bytes/ms, then suppresses Enter briefly.
+        // ponytail: best-effort ConPTY timing; remove when Codex exposes a paste-complete boundary.
+        return Duration::from_millis(600 + prompt_bytes as u64 / 4);
+    }
+    #[cfg(not(windows))]
+    let _ = (agent, prompt_bytes);
+    AGENT_PROMPT_SUBMIT_DELAY
+}
+
 impl App {
     pub(super) fn handle_agent_list(&mut self, id: String) -> String {
         encode_success(
@@ -59,13 +78,63 @@ impl App {
         encode_success(id, ResponseResult::AgentStarted { agent, argv })
     }
 
-    pub(super) fn handle_agent_prompt(&mut self, id: String, params: AgentPromptParams) -> String {
+    pub(crate) fn handle_deferred_agent_api_request(
+        &mut self,
+        request: crate::api::schema::Request,
+        respond_to: std::sync::mpsc::Sender<String>,
+    ) -> bool {
+        let crate::api::schema::Method::AgentPrompt(params) = request.method else {
+            return false;
+        };
+        match self.queue_agent_prompt(request.id, params) {
+            Ok(QueuedAgentPrompt {
+                id,
+                agent,
+                completion,
+                attachments,
+            }) => {
+                let event_tx = self.event_tx.clone();
+                std::thread::spawn(move || {
+                    let result = completion.recv();
+                    if !matches!(&result, Ok(Ok(()))) && !attachments.is_empty() {
+                        // Return cleanup to the App that owns attachment bookkeeping.
+                        let _ = event_tx.blocking_send(
+                            crate::events::AppEvent::AgentPromptSubmissionFailed { attachments },
+                        );
+                    }
+                    let response = match result {
+                        Ok(Ok(())) => encode_success(id, ResponseResult::AgentPrompted { agent }),
+                        Ok(Err(err)) if err.kind() == std::io::ErrorKind::TimedOut => {
+                            encode_error(id, "timeout", err.to_string())
+                        }
+                        Ok(Err(err)) => encode_error(id, "agent_prompt_failed", err.to_string()),
+                        Err(_) => encode_error(id, "agent_prompt_failed", "pty actor closed"),
+                    };
+                    let _ = respond_to.send(response);
+                });
+            }
+            Err(response) => {
+                let _ = respond_to.send(response);
+            }
+        }
+        true
+    }
+
+    fn queue_agent_prompt(
+        &mut self,
+        id: String,
+        params: AgentPromptParams,
+    ) -> Result<QueuedAgentPrompt, String> {
         if params.text.is_empty() && params.attachments.is_empty() {
-            return encode_error(id, "empty_agent_prompt", "agent prompt must not be empty");
+            return Err(encode_error(
+                id,
+                "empty_agent_prompt",
+                "agent prompt must not be empty",
+            ));
         }
         let resolved = match self.resolve_agent_target(&params.target) {
             Ok(resolved) => resolved,
-            Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
+            Err(err) => return Err(encode_error_body(id, self.agent_target_error_body(err))),
         };
         let Some(terminal_id) = self
             .state
@@ -74,98 +143,113 @@ impl App {
             .and_then(|workspace| workspace.terminal_id(resolved.pane_id))
             .cloned()
         else {
-            return agent_not_found(id, &params.target);
+            return Err(agent_not_found(id, &params.target));
         };
         let Some(terminal) = self.state.terminals.get(&terminal_id) else {
-            return agent_not_found(id, &params.target);
+            return Err(agent_not_found(id, &params.target));
         };
         if terminal.state == crate::detect::AgentState::Blocked {
-            return encode_error(
+            return Err(encode_error(
                 id,
                 "agent_blocked",
                 format!(
                     "agent {} is blocked and requires interactive input",
                     params.target
                 ),
-            );
+            ));
         }
         let Some(expected_agent) = terminal.effective_known_agent() else {
-            return agent_not_ready(id, &params.target);
+            return Err(agent_not_ready(id, &params.target));
         };
         if terminal.managed_agent_launch_pending() {
-            return agent_not_ready(id, &params.target);
+            return Err(agent_not_ready(id, &params.target));
         }
         let staged_attachments = if params.attachments.is_empty() {
             Vec::new()
         } else {
             match self.take_prompt_attachments(&params.target, &params.attachments) {
                 Ok(attachments) => attachments,
-                Err((code, message)) => return encode_error(id, &code, message),
+                Err((code, message)) => return Err(encode_error(id, &code, message)),
             }
         };
-        let Some(runtime) = self.lookup_runtime_sender(resolved.ws_idx, resolved.pane_id) else {
-            self.attachment_store
-                .discard_prompt_attachments(&staged_attachments);
-            return agent_not_found(id, &params.target);
-        };
-        if !super::super::agents::runtime_hosts_agent(runtime, expected_agent) {
-            self.attachment_store
-                .discard_prompt_attachments(&staged_attachments);
-            return encode_error(
-                id,
-                "agent_not_ready",
-                format!(
-                    "agent {} is no longer the pane foreground process",
-                    params.target
-                ),
-            );
-        }
-        let prompt_text = if staged_attachments.is_empty() {
-            params.text
-        } else {
-            let paths = staged_attachments
-                .iter()
-                .map(|attachment| {
-                    format!(
-                        "{} [{}; {}; {}]",
-                        attachment.path.display(),
-                        attachment.name,
-                        attachment.media_type,
-                        attachment.byte_size,
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!("{}\n\nAttached files:\n{paths}", params.text)
-        };
-        if expected_agent == crate::detect::Agent::GithubCopilot {
-            // Copilot ignores synthetic Enter after focus loss until it receives focus gained.
-            let focus = match crate::ghostty::encode_focus(crate::ghostty::FocusEvent::Gained) {
-                Ok(focus) => focus,
-                Err(err) => {
-                    self.attachment_store
-                        .discard_prompt_attachments(&staged_attachments);
-                    return encode_error(id, "agent_prompt_failed", err.to_string());
-                }
+        let result = (|| {
+            let Some(runtime) = self.lookup_runtime_sender(resolved.ws_idx, resolved.pane_id)
+            else {
+                return Err(agent_not_found(id, &params.target));
             };
-            if let Err(err) = runtime.try_send_bytes(Bytes::from(focus)) {
-                self.attachment_store
-                    .discard_prompt_attachments(&staged_attachments);
-                return encode_error(id, "agent_prompt_failed", err.to_string());
+            if !super::super::agents::runtime_hosts_agent(runtime, expected_agent) {
+                return Err(encode_error(
+                    id,
+                    "agent_not_ready",
+                    format!(
+                        "agent {} is no longer the pane foreground process",
+                        params.target
+                    ),
+                ));
             }
-        }
-        let (text, enter) =
-            crate::app::api_helpers::encode_api_submission_parts(runtime, &prompt_text);
-        if let Err(err) = runtime.try_send_bytes(Bytes::from(text)) {
+            let prompt_text = if staged_attachments.is_empty() {
+                params.text
+            } else {
+                let paths = staged_attachments
+                    .iter()
+                    .map(|attachment| {
+                        format!(
+                            "{} [{}; {}; {}]",
+                            attachment.path.display(),
+                            attachment.name,
+                            attachment.media_type,
+                            attachment.byte_size,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("{}\n\nAttached files:\n{paths}", params.text)
+            };
+            let submit_delay = agent_prompt_submit_delay(expected_agent, prompt_text.len());
+            #[cfg(windows)]
+            let submit_deadline = params
+                .wait
+                .as_ref()
+                .and_then(|wait| wait.submission_deadline);
+            #[cfg(not(windows))]
+            let submit_deadline = None;
+            if expected_agent == crate::detect::Agent::GithubCopilot {
+                // Copilot ignores synthetic Enter after focus loss until it receives focus gained.
+                let focus = match crate::ghostty::encode_focus(crate::ghostty::FocusEvent::Gained) {
+                    Ok(focus) => focus,
+                    Err(err) => {
+                        return Err(encode_error(id, "agent_prompt_failed", err.to_string()));
+                    }
+                };
+                if let Err(err) = runtime.try_send_bytes(Bytes::from(focus)) {
+                    return Err(encode_error(id, "agent_prompt_failed", err.to_string()));
+                }
+            }
+            let (text, enter) =
+                crate::app::api_helpers::encode_api_submission_parts(runtime, &prompt_text);
+            let Some(agent) = self.agent_info(resolved.ws_idx, resolved.pane_id) else {
+                return Err(agent_not_found(id, &params.target));
+            };
+            let completion = runtime
+                .queue_user_input_submission(
+                    Bytes::from(text),
+                    Bytes::from(enter),
+                    submit_delay,
+                    submit_deadline,
+                )
+                .map_err(|err| encode_error(id.clone(), "agent_prompt_failed", err.to_string()))?;
+            Ok((id, agent, completion))
+        })();
+        if result.is_err() {
             self.attachment_store
                 .discard_prompt_attachments(&staged_attachments);
-            return encode_error(id, "agent_prompt_failed", err.to_string());
         }
-        runtime.send_bytes_after(Bytes::from(enter), AGENT_PROMPT_SUBMIT_DELAY);
-        let Some(agent) = self.agent_info(resolved.ws_idx, resolved.pane_id) else {
-            return agent_not_found(id, &params.target);
-        };
-        encode_success(id, ResponseResult::AgentPrompted { agent })
+        result.map(|(id, agent, completion)| QueuedAgentPrompt {
+            id,
+            agent,
+            completion,
+            attachments: staged_attachments,
+        })
     }
 
     pub(super) fn handle_agent_read(
@@ -357,7 +441,7 @@ mod tests {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &Config::default(),
-            true,
+            crate::app::AppPolicy::TEST,
             None,
             api_rx,
             crate::api::EventHub::default(),
@@ -368,6 +452,41 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app
+    }
+
+    fn start_deferred_agent_prompt(
+        app: &mut App,
+        id: &str,
+        params: AgentPromptParams,
+    ) -> std::sync::mpsc::Receiver<String> {
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        assert!(app.handle_deferred_agent_api_request(
+            crate::api::schema::Request {
+                id: id.into(),
+                method: crate::api::schema::Method::AgentPrompt(params),
+            },
+            respond_to,
+        ));
+        response_rx
+    }
+
+    fn run_deferred_agent_prompt(app: &mut App, id: &str, params: AgentPromptParams) -> String {
+        start_deferred_agent_prompt(app, id, params)
+            .recv_timeout(Duration::from_secs(1))
+            .expect("agent prompt responds after submission")
+    }
+
+    #[test]
+    fn prompt_delay_only_scales_for_windows_codex() {
+        let codex_delay = agent_prompt_submit_delay(Agent::Codex, 4_096);
+        #[cfg(windows)]
+        assert_eq!(codex_delay, Duration::from_millis(1_624));
+        #[cfg(not(windows))]
+        assert_eq!(codex_delay, AGENT_PROMPT_SUBMIT_DELAY);
+        assert_eq!(
+            agent_prompt_submit_delay(Agent::OpenCode, 4_096),
+            AGENT_PROMPT_SUBMIT_DELAY
+        );
     }
 
     #[tokio::test]
@@ -382,15 +501,16 @@ mod tests {
         terminal.set_detected_state(Some(Agent::OpenCode), AgentState::Working);
         let (runtime, mut rx) =
             crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
-                80, 24, 0, b"", 1,
+                80, 24, 0, b"", 2,
             );
         runtime.test_process_pty_bytes(b"\x1b[?2004h");
         app.state.insert_test_runtime(pane_id, runtime);
 
         let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
         let bracketed_started = std::time::Instant::now();
-        let response = app.handle_agent_prompt(
-            "req".into(),
+        let response_rx = start_deferred_agent_prompt(
+            &mut app,
+            "req",
             AgentPromptParams {
                 target: public_pane_id,
                 text: "A != B".into(),
@@ -398,6 +518,10 @@ mod tests {
                 attachments: vec![],
             },
         );
+        assert!(response_rx.try_recv().is_err());
+        let response = response_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("agent prompt responds after submission");
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         let ResponseResult::AgentPrompted { agent, .. } = success.result else {
             panic!("expected prompted response");
@@ -407,22 +531,16 @@ mod tests {
             rx.try_recv().unwrap(),
             Bytes::from_static(b"\x1b[200~A != B\x1b[201~")
         );
-        assert!(rx.try_recv().is_err());
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), rx.recv())
-                .await
-                .unwrap()
-                .unwrap(),
-            Bytes::from_static(b"\r")
-        );
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\r"));
         assert!(bracketed_started.elapsed() >= AGENT_PROMPT_SUBMIT_DELAY);
 
         app.lookup_runtime_sender(0, pane_id)
             .unwrap()
             .test_process_pty_bytes(b"\x1b[?2004l");
         let raw_started = std::time::Instant::now();
-        let raw = app.handle_agent_prompt(
-            "req-raw".into(),
+        let raw = run_deferred_agent_prompt(
+            &mut app,
+            "req-raw",
             AgentPromptParams {
                 target: "reviewer".into(),
                 text: "A != B".into(),
@@ -433,18 +551,12 @@ mod tests {
         let raw: SuccessResponse = serde_json::from_str(&raw).unwrap();
         assert!(matches!(raw.result, ResponseResult::AgentPrompted { .. }));
         assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"A != B"));
-        assert!(rx.try_recv().is_err());
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), rx.recv())
-                .await
-                .unwrap()
-                .unwrap(),
-            Bytes::from_static(b"\r")
-        );
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\r"));
         assert!(raw_started.elapsed() >= AGENT_PROMPT_SUBMIT_DELAY);
 
-        let rejected = app.handle_agent_prompt(
-            "req-label".into(),
+        let rejected = run_deferred_agent_prompt(
+            &mut app,
+            "req-label",
             AgentPromptParams {
                 target: "opencode".into(),
                 text: "wrong target".into(),
@@ -506,8 +618,9 @@ mod tests {
             .unwrap();
         let attachment = app.attachment_store.finish(upload).unwrap();
 
-        let response = app.handle_agent_prompt(
-            "req".into(),
+        let response = run_deferred_agent_prompt(
+            &mut app,
+            "req",
             AgentPromptParams {
                 target: "reviewer".into(),
                 text: String::new(),
@@ -535,6 +648,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_prompt_submission_failure_discards_attachment_files_and_quota() {
+        use crate::api::schema::conversations::{
+            AgentAttachmentBeginParams, AgentAttachmentChunkParams,
+        };
+        use base64::Engine as _;
+        use sha2::{Digest, Sha256};
+
+        // Copilot fails synchronously when sending focus; OpenCode fails only
+        // after the queued PTY submission has been accepted.
+        for agent in [Agent::GithubCopilot, Agent::OpenCode] {
+            let mut app = app_with_agent();
+            let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[0]
+                .terminal_id(pane_id)
+                .unwrap()
+                .clone();
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.set_agent_name("reviewer".into());
+            terminal.set_detected_state(Some(agent), AgentState::Idle);
+            terminal.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
+                source: "test".into(),
+                agent: crate::detect::agent_label(agent).into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("attachment-session")
+                    .unwrap(),
+            });
+            let (runtime, rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+            drop(rx);
+            app.state.insert_test_runtime(pane_id, runtime);
+            let (_, session) = app.attachment_binding("reviewer").unwrap();
+            let bytes = b"attachment bytes";
+            let (upload, _) = app
+                .attachment_store
+                .begin(
+                    pane_id,
+                    &session,
+                    &AgentAttachmentBeginParams {
+                        target: "reviewer".into(),
+                        media_type: "image/png".into(),
+                        name: "image.png".into(),
+                        byte_size: bytes.len() as u64,
+                        sha256_digest: format!("{:x}", Sha256::digest(bytes)),
+                    },
+                )
+                .unwrap();
+            app.attachment_store
+                .chunk(AgentAttachmentChunkParams {
+                    upload: upload.clone(),
+                    index: 0,
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                })
+                .unwrap();
+            let attachment = app.attachment_store.finish(upload).unwrap();
+            let path = app
+                .attachment_store
+                .resolve(pane_id, &session, &attachment)
+                .unwrap()
+                .path;
+            assert!(path.exists());
+            let response = run_deferred_agent_prompt(
+                &mut app,
+                "failed",
+                AgentPromptParams {
+                    target: "reviewer".into(),
+                    text: String::new(),
+                    wait: None,
+                    attachments: vec![attachment.clone()],
+                },
+            );
+            let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+            assert_eq!(error.error.code, "agent_prompt_failed");
+            if agent == Agent::OpenCode {
+                let event = app
+                    .event_rx
+                    .try_recv()
+                    .expect("failed submission schedules cleanup");
+                assert!(matches!(
+                    &event,
+                    crate::events::AppEvent::AgentPromptSubmissionFailed { .. }
+                ));
+                app.handle_internal_event(event);
+            }
+            assert!(!path.exists(), "failed submission retained attachment file");
+            assert!(app
+                .attachment_store
+                .resolve(pane_id, &session, &attachment)
+                .is_err());
+            // Every staged handle counts toward the same 32-upload quota. All
+            // slots must be reusable immediately, without waiting for the TTL.
+            for _ in 0..32 {
+                app.attachment_store
+                    .begin(
+                        pane_id,
+                        &session,
+                        &AgentAttachmentBeginParams {
+                            target: "reviewer".into(),
+                            media_type: "image/png".into(),
+                            name: "next.png".into(),
+                            byte_size: bytes.len() as u64,
+                            sha256_digest: format!("{:x}", Sha256::digest(bytes)),
+                        },
+                    )
+                    .expect("failed submission released its quota slot");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn agent_prompt_focuses_copilot_before_submitting() {
         let mut app = app_with_agent();
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
@@ -551,8 +771,9 @@ mod tests {
         runtime.test_process_pty_bytes(b"\x1b[?2004h");
         app.state.insert_test_runtime(pane_id, runtime);
 
-        let response = app.handle_agent_prompt(
-            "req".into(),
+        let response = run_deferred_agent_prompt(
+            &mut app,
+            "req",
             AgentPromptParams {
                 target: "reviewer".into(),
                 text: "A != B".into(),
@@ -570,13 +791,7 @@ mod tests {
             rx.try_recv().unwrap(),
             Bytes::from_static(b"\x1b[200~A != B\x1b[201~")
         );
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), rx.recv())
-                .await
-                .unwrap()
-                .unwrap(),
-            Bytes::from_static(b"\r")
-        );
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\r"));
     }
 
     #[tokio::test]
@@ -636,8 +851,9 @@ mod tests {
         let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
         app.state.insert_test_runtime(pane_id, runtime);
 
-        let response = app.handle_agent_prompt(
-            "req-pending".into(),
+        let response = run_deferred_agent_prompt(
+            &mut app,
+            "req-pending",
             AgentPromptParams {
                 target: "reviewer".into(),
                 text: "A != B".into(),

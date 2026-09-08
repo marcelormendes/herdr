@@ -84,6 +84,7 @@ fn run_shell_hook_with_env(
         .env("HERDR_SOCKET_PATH", &socket_path)
         .env("HERDR_PANE_ID", "p_test")
         .env_remove("CODEX_THREAD_ID")
+        .env_remove("CURSOR_VERSION")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -164,6 +165,31 @@ fn claude_hook_reports_session_id_from_stdin() {
         supplied_path["params"]["agent_session_path"],
         "/tmp/provider-supplied.jsonl"
     );
+}
+
+#[test]
+fn claude_hook_ignores_cursor_compatibility_payloads() {
+    assert!(run_claude_hook(
+        "session",
+        r#"{"hook_event_name":"sessionStart","session_id":"cursor-session"}"#,
+    )
+    .is_none());
+
+    assert!(run_claude_hook(
+        "session",
+        r#"{"hook_event_name":"SessionStart","session_id":"cursor-session","cursor_version":"2026.08.11-e8db854"}"#,
+    )
+    .is_none());
+
+    for cursor_version in ["2026.08.11-e8db854", ""] {
+        assert!(run_shell_hook_with_env(
+            "src/integration/assets/claude/herdr-agent-state.sh",
+            &["session"],
+            r#"{"hook_event_name":"SessionStart","session_id":"cursor-session"}"#,
+            &[("CURSOR_VERSION", cursor_version)],
+        )
+        .is_none());
+    }
 }
 
 #[test]

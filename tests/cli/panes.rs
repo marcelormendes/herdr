@@ -568,6 +568,101 @@ fn pane_shell_gets_herdr_socket_and_pane_env() {
 }
 
 #[test]
+fn pane_agent_reports_accept_options_before_pane() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_agent_report_1","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Session reports authenticate with a capability injected into this pane.
+    // Capture it through the child environment, never through a public API field.
+    let capability_file = base.join("pane-capability.txt");
+    let capture = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "run",
+            &pane_id,
+            &format!(
+                "umask 077; printf '%s' \"$HERDR_INTEGRATION_CAPABILITY\" > {}",
+                capability_file.display()
+            ),
+        ],
+    );
+    assert!(capture.status.success());
+    assert!(wait_until(
+        Duration::from_secs(3),
+        Duration::from_millis(25),
+        || fs::read_to_string(&capability_file).is_ok_and(|value| !value.is_empty()),
+    ));
+    let capability = fs::read_to_string(&capability_file).unwrap();
+
+    let state_report = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "report-agent",
+            "--source=custom:cli-test",
+            "--agent=cli-test",
+            "--state=working",
+            "--message=parsing=works",
+            &pane_id,
+        ],
+    );
+    assert!(
+        state_report.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&state_report.stderr)
+    );
+    assert!(state_report.stdout.is_empty());
+    assert!(state_report.stderr.is_empty());
+
+    let agent = run_cli_json(&socket_path, &["agent", "get", &pane_id]);
+    assert_eq!(agent["result"]["agent"]["agent"], "cli-test");
+    assert_eq!(agent["result"]["agent"]["agent_status"], "working");
+
+    let session_report = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .env("HERDR_SOCKET_PATH", &socket_path)
+        .env("HERDR_INTEGRATION_CAPABILITY", capability)
+        .args([
+            "pane",
+            "report-agent-session",
+            "--source=custom:cli-test",
+            "--agent=cli-test",
+            "--seq=1",
+            "--agent-session-id=session=1",
+            "--session-start-source=startup",
+            &pane_id,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        session_report.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&session_report.stderr)
+    );
+    assert!(session_report.stdout.is_empty());
+    assert!(session_report.stderr.is_empty());
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn pane_read_rejects_invalid_value_with_usage_error() {
     // Invalid option values fail as CLI usage errors before any server
     // contact: exit 2 with the plain parser message, not the old

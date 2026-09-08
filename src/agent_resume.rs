@@ -137,6 +137,24 @@ fn random_hex(bytes: usize) -> Option<String> {
     Some(buf.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
+pub fn persisted_session_from_launch_args(
+    agent: crate::detect::Agent,
+    args: &[String],
+) -> Option<PersistedAgentSession> {
+    let [command, session_id] = args else {
+        return None;
+    };
+    if agent != crate::detect::Agent::Codex || command != "resume" || session_id.starts_with('-') {
+        return None;
+    }
+
+    Some(PersistedAgentSession {
+        source: "herdr:codex".into(),
+        agent: "codex".into(),
+        session_ref: AgentSessionRef::id(session_id.clone())?,
+    })
+}
+
 pub fn normalize_session_start_source(value: Option<String>) -> Option<String> {
     match value.as_deref().map(str::trim) {
         Some(
@@ -330,7 +348,7 @@ fn valid_session_path(value: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn absolute_test_path(name: &str) -> String {
+    pub(super) fn absolute_test_path(name: &str) -> String {
         std::env::current_dir()
             .unwrap()
             .join(name)
@@ -348,6 +366,40 @@ mod tests {
             "herdr:opencode",
             "opencode"
         ));
+    }
+
+    #[test]
+    fn codex_noncanonical_resume_launch_has_no_explicit_session() {
+        assert_eq!(
+            persisted_session_from_launch_args(
+                crate::detect::Agent::Codex,
+                &["resume".into(), "codex-session".into()]
+            )
+            .unwrap()
+            .session_ref
+            .value,
+            "codex-session"
+        );
+        assert!(persisted_session_from_launch_args(
+            crate::detect::Agent::Codex,
+            &["resume".into(), "--last".into()]
+        )
+        .is_none());
+        assert!(persisted_session_from_launch_args(
+            crate::detect::Agent::Codex,
+            &["resume".into(), "not-a-session".into(), "--last".into()]
+        )
+        .is_none());
+        assert!(persisted_session_from_launch_args(
+            crate::detect::Agent::Codex,
+            &[
+                "--remote".into(),
+                "ws://example.test".into(),
+                "resume".into(),
+                "remote-session".into(),
+            ]
+        )
+        .is_none());
     }
 
     #[test]
@@ -629,7 +681,7 @@ mod tests {
             "herdr:droid",
             "droid",
             None,
-            Some("/tmp/droid-session".into())
+            Some(absolute_test_path("droid-session"))
         )
         .is_none());
 
@@ -829,12 +881,13 @@ mod tests {
 
 #[cfg(test)]
 mod unified_chat_phase2_tests {
+    use super::tests::absolute_test_path;
     use super::*;
 
     #[test]
     fn transcript_ref_from_report_accepts_official_providers_with_absolute_paths() {
         for agent in ["pi", "omp", "codex", "claude"] {
-            let t = transcript_ref_from_report(agent, Some("/home/u/.pi/session.jsonl".into()));
+            let t = transcript_ref_from_report(agent, Some(absolute_test_path("session.jsonl")));
             assert!(t.is_some(), "{agent} should accept an absolute path");
         }
         assert!(transcript_ref_from_report("codex", None).is_none());
@@ -844,8 +897,8 @@ mod unified_chat_phase2_tests {
     fn transcript_ref_rejects_relative_empty_and_non_official_paths() {
         assert!(TranscriptRef::new("codex", "relative.jsonl").is_none());
         assert!(TranscriptRef::new("codex", "").is_none());
-        assert!(TranscriptRef::new("codex", "/bad\npath").is_none());
-        assert!(TranscriptRef::new("copilot", "/tmp/x.jsonl").is_none());
+        assert!(TranscriptRef::new("codex", absolute_test_path("bad\npath")).is_none());
+        assert!(TranscriptRef::new("copilot", absolute_test_path("x.jsonl")).is_none());
     }
 
     #[test]
