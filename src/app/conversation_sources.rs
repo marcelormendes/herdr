@@ -238,7 +238,8 @@ mod tests {
     fn duplicate_accepted_report_keeps_conversation_handle() {
         let mut registry = ConversationSourceRegistry::default();
         let pane = PaneId::from_raw(3);
-        let transcript = TranscriptRef::new("codex", "/tmp/codex.jsonl").unwrap();
+        let transcript =
+            TranscriptRef::new("codex", std::env::temp_dir().join("codex.jsonl")).unwrap();
         registry.accept(pane, "key-1".into(), "codex", Some(transcript.clone()));
         let first = registry
             .current_for(pane, Some("key-1"))
@@ -258,7 +259,8 @@ mod tests {
     fn accept_replaces_and_clear_removes() {
         let mut registry = ConversationSourceRegistry::default();
         let pane = PaneId::from_raw(2);
-        let transcript = TranscriptRef::new("codex", "/tmp/codex.jsonl").unwrap();
+        let transcript =
+            TranscriptRef::new("codex", std::env::temp_dir().join("codex.jsonl")).unwrap();
 
         registry.accept(pane, "key-1".into(), "codex", Some(transcript.clone()));
         let entry = registry.current_for(pane, Some("key-1")).unwrap();
@@ -274,8 +276,10 @@ mod tests {
 
     #[test]
     fn session_identity_key_matches_across_accept_and_read() {
-        let key = session_identity_key("herdr:pi", "pi", "path", "/tmp/pi.jsonl");
-        assert_eq!(key, "herdr:pi:pi:path:/tmp/pi.jsonl");
+        let transcript_path = std::env::temp_dir().join("pi.jsonl");
+        let path_value = transcript_path.to_str().unwrap();
+        let key = session_identity_key("herdr:pi", "pi", "path", path_value);
+        assert_eq!(key, format!("herdr:pi:pi:path:{path_value}"));
         let id_key = session_identity_key("herdr:claude", "claude", "id", "abc");
         assert_eq!(id_key, "herdr:claude:claude:id:abc");
         assert_ne!(key, id_key);
@@ -322,16 +326,17 @@ mod tests {
 
     #[test]
     fn legacy_path_session_restores_its_transcript_source() {
+        let transcript_path = std::env::temp_dir().join("pi-session.jsonl");
         let session = crate::persist::PaneAgentSessionSnapshot {
             source: "herdr:pi".into(),
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
-            value: "/tmp/pi-session.jsonl".into(),
+            value: transcript_path.to_str().unwrap().into(),
         };
 
         assert_eq!(
             restored_transcript_path(None, Some(&session)),
-            Some(PathBuf::from("/tmp/pi-session.jsonl"))
+            Some(transcript_path)
         );
     }
 }

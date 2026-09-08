@@ -589,6 +589,29 @@ fn pane_agent_reports_accept_options_before_pane() {
         .unwrap()
         .to_string();
 
+    // Session reports authenticate with a capability injected into this pane.
+    // Capture it through the child environment, never through a public API field.
+    let capability_file = base.join("pane-capability.txt");
+    let capture = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "run",
+            &pane_id,
+            &format!(
+                "umask 077; printf '%s' \"$HERDR_INTEGRATION_CAPABILITY\" > {}",
+                capability_file.display()
+            ),
+        ],
+    );
+    assert!(capture.status.success());
+    assert!(wait_until(
+        Duration::from_secs(3),
+        Duration::from_millis(25),
+        || fs::read_to_string(&capability_file).is_ok_and(|value| !value.is_empty()),
+    ));
+    let capability = fs::read_to_string(&capability_file).unwrap();
+
     let state_report = run_cli(
         &socket_path,
         &[
@@ -613,9 +636,10 @@ fn pane_agent_reports_accept_options_before_pane() {
     assert_eq!(agent["result"]["agent"]["agent"], "cli-test");
     assert_eq!(agent["result"]["agent"]["agent_status"], "working");
 
-    let session_report = run_cli(
-        &socket_path,
-        &[
+    let session_report = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .env("HERDR_SOCKET_PATH", &socket_path)
+        .env("HERDR_INTEGRATION_CAPABILITY", capability)
+        .args([
             "pane",
             "report-agent-session",
             "--source=custom:cli-test",
@@ -624,8 +648,9 @@ fn pane_agent_reports_accept_options_before_pane() {
             "--agent-session-id=session=1",
             "--session-start-source=startup",
             &pane_id,
-        ],
-    );
+        ])
+        .output()
+        .unwrap();
     assert!(
         session_report.status.success(),
         "stderr: {}",

@@ -348,7 +348,7 @@ fn valid_session_path(value: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn absolute_test_path(name: &str) -> String {
+    pub(super) fn absolute_test_path(name: &str) -> String {
         std::env::current_dir()
             .unwrap()
             .join(name)
@@ -681,7 +681,7 @@ mod tests {
             "herdr:droid",
             "droid",
             None,
-            Some("/tmp/droid-session".into())
+            Some(absolute_test_path("droid-session"))
         )
         .is_none());
 
@@ -881,12 +881,13 @@ mod tests {
 
 #[cfg(test)]
 mod unified_chat_phase2_tests {
+    use super::tests::absolute_test_path;
     use super::*;
 
     #[test]
     fn transcript_ref_from_report_accepts_official_providers_with_absolute_paths() {
         for agent in ["pi", "omp", "codex", "claude"] {
-            let t = transcript_ref_from_report(agent, Some("/home/u/.pi/session.jsonl".into()));
+            let t = transcript_ref_from_report(agent, Some(absolute_test_path("session.jsonl")));
             assert!(t.is_some(), "{agent} should accept an absolute path");
         }
         assert!(transcript_ref_from_report("codex", None).is_none());
@@ -896,8 +897,8 @@ mod unified_chat_phase2_tests {
     fn transcript_ref_rejects_relative_empty_and_non_official_paths() {
         assert!(TranscriptRef::new("codex", "relative.jsonl").is_none());
         assert!(TranscriptRef::new("codex", "").is_none());
-        assert!(TranscriptRef::new("codex", "/bad\npath").is_none());
-        assert!(TranscriptRef::new("copilot", "/tmp/x.jsonl").is_none());
+        assert!(TranscriptRef::new("codex", absolute_test_path("bad\npath")).is_none());
+        assert!(TranscriptRef::new("copilot", absolute_test_path("x.jsonl")).is_none());
     }
 
     #[test]
