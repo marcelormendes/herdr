@@ -2,7 +2,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=12
+# HERDR_INTEGRATION_VERSION=13
 
 param([string]$Action = "")
 
@@ -17,8 +17,11 @@ try {
     exit 0
 }
 
+$propertyNames = @($payload.PSObject.Properties.Name)
+if ((Test-Path Env:CURSOR_VERSION) -or $propertyNames -ccontains "cursor_version") { exit 0 }
+# Stop refreshes the root transcript for Drover after the final response.
+if (-not ($propertyNames -ccontains "hook_event_name") -or $payload.hook_event_name -isnot [string] -or @("SessionStart", "Stop") -cnotcontains $payload.hook_event_name) { exit 0 }
 if (-not [string]::IsNullOrWhiteSpace($payload.agent_id)) { exit 0 }
-if ($payload.hook_event_name -eq "SubagentStop") { exit 0 }
 
 $sessionId = $payload.session_id
 if ([string]::IsNullOrWhiteSpace($sessionId)) { exit 0 }

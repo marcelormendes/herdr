@@ -121,7 +121,7 @@ async function startRecordingServer(name: string): Promise<unknown[]> {
   server = recordingServer;
   await new Promise<void>((resolve, reject) => {
     recordingServer.once("error", reject);
-    recordingServer.listen(recordingSocketPath, resolve);
+    recordingServer.listen(originalPlatform === "win32" ? `\\\\.\\pipe\\${recordingSocketPath}` : recordingSocketPath, resolve);
   });
   configureIntegrationEnvironment(recordingSocketPath);
   return requests;
@@ -450,72 +450,75 @@ test("OMP publishes live tool and approval overlays", async () => {
   ).toEqual([]);
 });
 
-test("OMP keeps scheduling pauses active until the terminal agent end", async () => {
-  const requests = await startRecordingServer("omp-terminal-settlement");
-  process.env.HERDR_OMP_IDLE_DEBOUNCE_MS = "0";
-  const { handlers, pi } = createExtensionHarness();
-  const { default: install } = await importFresh("./omp/herdr-agent-state.ts");
-  install(pi);
-  const context = {
-    hasUI: true,
-    isIdle: () => false,
-    sessionManager: {
-      getSessionFile: () => "/tmp/omp-terminal-settlement.jsonl",
-      getSessionId: () => "omp-terminal-settlement",
-    },
-  };
-  const turnStates = () =>
-    requests
-      .filter(
+for (const pause of [{ isTerminal: false }, { willContinue: true }]) {
+  test(`OMP keeps scheduling pauses active until the terminal agent end (${JSON.stringify(pause)})`, async () => {
+    const requests = await startRecordingServer("omp-terminal-settlement");
+    process.env.HERDR_OMP_IDLE_DEBOUNCE_MS = "0";
+    const { handlers, pi } = createExtensionHarness();
+    const { default: install } = await importFresh("./omp/herdr-agent-state.ts");
+    install(pi);
+    const context = {
+      hasUI: true,
+      isIdle: () => false,
+      sessionManager: {
+        getSessionFile: () => "/tmp/omp-terminal-settlement.jsonl",
+        getSessionId: () => "omp-terminal-settlement",
+      },
+    };
+    const turnStates = () =>
+      requests
+        .filter(
+          (request) =>
+            isRecord(request) &&
+            request.method === "agent.conversation.report" &&
+            isRecord(request.params) &&
+            isRecord(request.params.payload) &&
+            request.params.payload.type === "turn_state",
+        )
+        .map((request) =>
+          isRecord(request) && isRecord(request.params) && isRecord(request.params.payload)
+            ? request.params.payload.state
+            : undefined,
+        );
+
+    handlers.get("session_start")?.({ reason: "startup" }, context);
+    handlers.get("agent_start")?.({}, context);
+    handlers.get("message_start")?.(
+      {
+        message: {
+          role: "user",
+          content: "Run the checks.",
+          timestamp: 1_700_000_000_000,
+        },
+      },
+      context,
+    );
+    await waitFor(() => turnStates().includes("started"));
+
+    handlers.get("agent_end")?.({ ...pause, messages: [] }, context);
+    handlers.get("tool_execution_start")?.(
+      { toolCallId: "after-pause", toolName: "bash", args: { command: "true" } },
+      context,
+    );
+    await waitFor(() =>
+      requests.some(
         (request) =>
           isRecord(request) &&
-          request.method === "agent.conversation.report" &&
           isRecord(request.params) &&
-          isRecord(request.params.payload) &&
-          request.params.payload.type === "turn_state",
-      )
-      .map((request) =>
-        isRecord(request) && isRecord(request.params) && isRecord(request.params.payload)
-          ? request.params.payload.state
-          : undefined,
-      );
+          request.params.native_id === "after-pause",
+      ),
+    );
+    expect(turnStates()).toEqual(["started"]);
+    expect(requestStates(requests).at(-1)).toBe("working");
 
-  handlers.get("session_start")?.({ reason: "startup" }, context);
-  handlers.get("agent_start")?.({}, context);
-  handlers.get("message_start")?.(
-    {
-      message: {
-        role: "user",
-        content: "Run the checks.",
-        timestamp: 1_700_000_000_000,
-      },
-    },
-    context,
-  );
-  await waitFor(() => turnStates().includes("started"));
+    handlers.get("agent_end")?.({ isTerminal: true, messages: [] }, context);
+    await waitFor(
+      () => turnStates().at(-1) === "completed" && requestStates(requests).at(-1) === "idle",
+    );
+    expect(turnStates()).toEqual(["started", "completed"]);
+  });
 
-  handlers.get("agent_end")?.({ isTerminal: false, messages: [] }, context);
-  handlers.get("tool_execution_start")?.(
-    { toolCallId: "after-pause", toolName: "bash", args: { command: "true" } },
-    context,
-  );
-  await waitFor(() =>
-    requests.some(
-      (request) =>
-        isRecord(request) &&
-        isRecord(request.params) &&
-        request.params.native_id === "after-pause",
-    ),
-  );
-  expect(turnStates()).toEqual(["started"]);
-  expect(requestStates(requests).at(-1)).toBe("working");
-
-  handlers.get("agent_end")?.({ isTerminal: true, messages: [] }, context);
-  await waitFor(
-    () => turnStates().at(-1) === "completed" && requestStates(requests).at(-1) === "idle",
-  );
-  expect(turnStates()).toEqual(["started", "completed"]);
-});
+}
 
 test("OMP ignores late assistant callbacks after settlement and during the next turn", async () => {
   const requests = await startRecordingServer("omp-late-messages");
@@ -905,7 +908,7 @@ test("Pi waits for a replacement session report before publishing state", async 
   server = recordingServer;
   await new Promise<void>((resolve, reject) => {
     recordingServer.once("error", reject);
-    recordingServer.listen(recordingSocketPath, resolve);
+    recordingServer.listen(originalPlatform === "win32" ? `\\\\.\\pipe\\${recordingSocketPath}` : recordingSocketPath, resolve);
   });
 
   configureIntegrationEnvironment(recordingSocketPath);
@@ -984,7 +987,7 @@ async function startDroppedFirstResponseServer(name: string) {
   server = recordingServer;
   await new Promise<void>((resolve, reject) => {
     recordingServer.once("error", reject);
-    recordingServer.listen(recordingSocketPath, resolve);
+    recordingServer.listen(originalPlatform === "win32" ? `\\\\.\\pipe\\${recordingSocketPath}` : recordingSocketPath, resolve);
   });
 
   configureIntegrationEnvironment(recordingSocketPath);
@@ -1028,6 +1031,45 @@ test("Oh My Pi retries working before a queued idle state", async () => {
   expect(attempts[1]).toEqual(attempts[0]);
   expect(requestState(attempts[0])).toBe("working");
   expect(requestState(attempts[2])).toBe("idle");
+});
+
+test("Oh My Pi keeps working when a turn ends with a scheduled continuation", async () => {
+  const requests = await startRecordingServer("omp-will-continue");
+  process.env.HERDR_OMP_IDLE_DEBOUNCE_MS = "0";
+  const { handlers, pi } = createExtensionHarness();
+
+  const { default: install } = await importFresh("./omp/herdr-agent-state.ts");
+  install(pi);
+
+  let idle = true;
+  const context = {
+    hasUI: true,
+    isIdle: () => idle,
+    sessionManager: {
+      getSessionFile: () => undefined,
+      getSessionId: () => undefined,
+    },
+  };
+
+  handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() => requestStates(requests).length === 1);
+
+  idle = false;
+  handlers.get("agent_start")?.({}, context);
+  await waitFor(() => requestStates(requests).length === 2);
+  expect(requestStates(requests)).toEqual(["idle", "working"]);
+
+  // OMP already scheduled an automatic continuation, so this loop end is not a
+  // user-visible settle and must not publish idle. See issue #2851.
+  handlers.get("agent_end")?.({ messages: [], willContinue: true }, context);
+  await Bun.sleep(50);
+  expect(requestStates(requests)).toEqual(["idle", "working"]);
+
+  // The real terminal end still settles the pane.
+  idle = true;
+  handlers.get("agent_end")?.({ messages: [] }, context);
+  await waitFor(() => requestStates(requests).length === 3);
+  expect(requestStates(requests)).toEqual(["idle", "working", "idle"]);
 });
 
 test("Pi retries working state after an unanswered socket attempt", async () => {
@@ -1113,3 +1155,39 @@ function requestState(request: unknown): unknown {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
+
+
+test.skipIf(originalPlatform === "win32")("Claude root Stop refreshes transcript while Cursor and subagent events remain excluded", async () => {
+  const requests = await startRecordingServer("claude-root-refresh");
+  const env = { ...process.env };
+  delete env.CURSOR_VERSION;
+  const payload = {
+    session_id: "claude-root-session",
+    transcript_path: "/tmp/claude-root-session.jsonl",
+    source: "startup",
+  };
+  const runHook = async (event: Record<string, unknown>, extraEnv = {}) => {
+    const child = Bun.spawn(["sh", join(import.meta.dir, "claude/herdr-agent-state.sh"), "session"], {
+      env: { ...env, ...extraEnv },
+      stdin: new Blob([JSON.stringify({ ...payload, ...event })]),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(await child.exited).toBe(0);
+  };
+  await runHook({ hook_event_name: "SessionStart" });
+  await runHook({ hook_event_name: "Stop" });
+  expect(requests).toHaveLength(2);
+  expect((requests[0] as any).params.session_start_source).toBe("startup");
+  expect((requests[1] as any).params).toMatchObject({
+    agent_session_id: payload.session_id,
+    agent_session_path: payload.transcript_path,
+  });
+  expect((requests[1] as any).params.session_start_source).toBeUndefined();
+  await runHook({ hook_event_name: "Stop", agent_id: "child" });
+  await runHook({ hook_event_name: "SubagentStop" });
+  await runHook({ hook_event_name: "sessionStart" });
+  await runHook({ hook_event_name: "SessionStart", cursor_version: "1" });
+  await runHook({ hook_event_name: "Stop" }, { CURSOR_VERSION: "1" });
+  expect(requests).toHaveLength(2);
+});

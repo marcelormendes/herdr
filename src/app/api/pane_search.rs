@@ -81,25 +81,6 @@ impl SearchCursor {
     }
 }
 
-fn selected_index(
-    matches: &[TerminalTextMatch],
-    direction: PaneSearchDirection,
-    previous: Option<TerminalTextMatch>,
-) -> Option<usize> {
-    if matches.is_empty() {
-        return None;
-    }
-    match direction {
-        PaneSearchDirection::First => Some(0),
-        PaneSearchDirection::Next => previous
-            .and_then(|previous| matches.iter().position(|item| item.start > previous.end))
-            .or(Some(0)),
-        PaneSearchDirection::Previous => previous
-            .and_then(|previous| matches.iter().rposition(|item| item.end < previous.start))
-            .or_else(|| matches.len().checked_sub(1)),
-    }
-}
-
 impl App {
     pub(super) fn handle_pane_search(&mut self, id: String, params: PaneSearchParams) -> String {
         if params.query.len() > MAX_QUERY_BYTES {
@@ -131,23 +112,33 @@ impl App {
         let Some((runtime, _)) = self.lookup_runtime(ws_idx, pane_id) else {
             return encode_error(id, "pane_not_found", "pane terminal unavailable");
         };
-        let matches = if params.query.is_empty() {
-            Vec::new()
+        let previous = if matches!(params.direction, PaneSearchDirection::First) {
+            None
         } else {
-            runtime.search_text_matches(&params.query, params.case_sensitive)
+            params
+                .cursor
+                .as_deref()
+                .and_then(|cursor| SearchCursor::decode(cursor, &params))
         };
-        // Find the anchor in the fresh scan before validating it. In addition to
-        // rejecting overwritten text this bounds work for untrusted cursor rows.
-        let previous = params
-            .cursor
-            .as_deref()
-            .and_then(|cursor| SearchCursor::decode(cursor, &params))
-            .filter(|previous| matches.contains(previous))
-            .filter(|previous| runtime.text_match_is_current(*previous));
-        let index = selected_index(&matches, params.direction, previous);
+        let direction = match params.direction {
+            PaneSearchDirection::First | PaneSearchDirection::Next => {
+                crate::pane::TerminalSearchDirection::Forward
+            }
+            PaneSearchDirection::Previous => crate::pane::TerminalSearchDirection::Backward,
+        };
+        let window = runtime.search_text_window_for_match(
+            &params.query,
+            params.case_sensitive,
+            direction,
+            previous,
+        );
+        let index = window.current_global;
         let mut cursor = None;
         let mut preview = None;
-        if let Some(selected) = index.and_then(|index| matches.get(index).copied()) {
+        if let Some(selected) = window
+            .current
+            .and_then(|index| window.matches.get(index).copied())
+        {
             let Some(context) = runtime.reveal_text_match(selected) else {
                 return encode_error(
                     id,
@@ -169,7 +160,7 @@ impl App {
                     terminal_id: params.terminal_id,
                     query: params.query,
                     case_sensitive: params.case_sensitive,
-                    match_count: matches.len(),
+                    match_count: window.total,
                     match_index: index,
                     cursor,
                     preview,
@@ -189,7 +180,7 @@ mod tests {
         let (_, rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &Config::default(),
-            true,
+            crate::app::AppPolicy::TEST,
             None,
             rx,
             crate::api::EventHub::default(),
@@ -436,6 +427,44 @@ mod tests {
             .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
             .unwrap();
         assert!(runtime.visible_text().contains("needle repeated"));
+    }
+
+    #[tokio::test]
+    async fn pane_search_retains_one_match_with_global_count_and_stale_cursor_fallback() {
+        let (app, _, pane_id) = fixture(20, 3, &"needle\r\n".repeat(5000));
+        let runtime = app
+            .state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .unwrap();
+        let first = runtime.search_text_window_for_match(
+            "needle",
+            false,
+            crate::pane::TerminalSearchDirection::Forward,
+            None,
+        );
+        assert_eq!(first.total, 5000);
+        assert_eq!(first.matches.len(), 1);
+        assert_eq!(first.current_global, Some(0));
+        assert_eq!(first.matches[0].start, TerminalTextPoint { row: 0, col: 0 });
+        let next = runtime.search_text_window_for_match(
+            "needle",
+            false,
+            crate::pane::TerminalSearchDirection::Forward,
+            Some(first.matches[0]),
+        );
+        assert_eq!(next.matches.len(), 1);
+        assert_eq!(next.current_global, Some(1));
+        let mut stale = first.matches[0];
+        stale.start.row = u32::MAX;
+        stale.end.row = u32::MAX;
+        let last = runtime.search_text_window_for_match(
+            "needle",
+            false,
+            crate::pane::TerminalSearchDirection::Backward,
+            Some(stale),
+        );
+        assert_eq!(last.matches.len(), 1);
+        assert_eq!(last.current_global, Some(4999));
     }
 
     #[test]
